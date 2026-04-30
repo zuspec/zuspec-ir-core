@@ -389,3 +389,53 @@ class QueueGetExpr(Expr):
     result_type: Optional['DataType'] = dc.field(default=None)
 
 
+# ---------------------------------------------------------------------------
+# zdc built-in typed IR nodes
+# These replace the string-matched ExprCall(ExprRefUnresolved("zdc.sext"), ...)
+# pattern with proper typed nodes for synthesis, simulation, and the solver.
+# ---------------------------------------------------------------------------
+
+@dc.dataclass(kw_only=True)
+class ExprSext(Expr):
+    """Sign-extend *value* from *bits* to the target width.
+
+    Equivalent to RTL: ``$signed($signed(value << (W-bits)) >>> (W-bits))``
+
+    *bits* is always a compile-time constant (source bit-width).
+    """
+    value: Expr = dc.field()
+    bits: int = dc.field()
+
+
+@dc.dataclass(kw_only=True)
+class ExprZext(Expr):
+    """Zero-extend *value* to the lower *bits* and zero the rest.
+
+    Equivalent to RTL: ``value[bits-1:0]``
+
+    *bits* is always a compile-time constant.
+    """
+    value: Expr = dc.field()
+    bits: int = dc.field()
+
+
+@dc.dataclass(kw_only=True)
+class ExprCbit(Expr):
+    """Reify a boolean/comparison expression to a 0/1 integer.
+
+    Equivalent to RTL: ``(expr ? 1'b1 : 1'b0)``
+    """
+    value: Expr = dc.field()
+
+
+@dc.dataclass(kw_only=True)
+class ExprSigned(Expr):
+    """Tag *value* as signed for comparison and arithmetic purposes.
+
+    Does not change the bit-pattern; affects how enclosing operations
+    interpret the value (signed vs unsigned context).
+
+    Equivalent to RTL: ``$signed(value)``
+    """
+    value: Expr = dc.field()
+
