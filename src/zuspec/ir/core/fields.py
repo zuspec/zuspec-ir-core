@@ -17,6 +17,10 @@ class FieldKind(enum.Enum):
     CallableExport = enum.auto() # Export: Callable[[...], Awaitable[...]]
     ProtocolExport = enum.auto() # Export: Protocol subclass (bundle of callables)
     QueueField = enum.auto()     # zdc.Queue[T] bounded FIFO component field
+    Input = enum.auto()          # PSS flow-object input reference
+    Output = enum.auto()         # PSS flow-object output reference
+    Lock = enum.auto()           # PSS lock (exclusive) resource claim on an action field
+    Share = enum.auto()          # PSS share (concurrent-read) resource claim on an action field
 
 class SignalDirection(enum.Enum):
     """Direction of hardware signals"""
@@ -67,3 +71,20 @@ class FieldInOut(Field):
     is_out : bool = dc.field()
 
 
+
+
+@dc.dataclass(kw_only=True)
+class Pool(Base):
+    """PSS pool declaration within a component."""
+    name : str = dc.field()
+    element_type_name : str = dc.field()           # flow-object type name
+    element_type : Optional[DataType] = dc.field(default=None)
+    capacity : Optional[int] = dc.field(default=None)  # None = unbounded; N = bounded pool declared as `pool [N] T name;`
+
+
+@dc.dataclass(kw_only=True)
+class PoolBind(Base):
+    """PSS bind directive: pool_name -> field_paths or wildcard."""
+    pool_name : str = dc.field()
+    field_paths : list = dc.field(default_factory=list)  # empty = wildcard (*)
+    is_wildcard : bool = dc.field(default=False)

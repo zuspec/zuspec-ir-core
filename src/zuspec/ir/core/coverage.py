@@ -89,3 +89,49 @@ class CrossBinDef:
     bin_selects: List[Any]  # BinSelectExpr from phase 3
     iff: Optional[Callable] = None
     loc: Optional[Any] = None
+
+
+# ---------------------------------------------------------------------------
+# PSS-path coverage IR nodes (distinct from Python-native CovergroupDef above)
+# ---------------------------------------------------------------------------
+
+@dataclasses.dataclass
+class PssCoverPoint:
+    """IR for a PSS coverpoint declaration.
+
+    Attributes:
+        name:              Coverpoint name.
+        target_expr:       IR Expr for the sampled variable.
+        ignore_bin_exprs:  List of IR Expr for ignore_bins.
+    """
+    name: str
+    target_expr: Any
+    ignore_bin_exprs: list = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass
+class PssCoverCross:
+    """IR for a PSS covergroup cross declaration.
+
+    Attributes:
+        name:             Cross name.
+        coverpoint_names: Names of CoverPoints being crossed.
+        ignore_bin_exprs: List of IR Expr for ignore_bins.
+    """
+    name: str
+    coverpoint_names: list  # list[str]
+    ignore_bin_exprs: list = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass
+class PssCoverGroup:
+    """IR for a PSS covergroup instance inside an action or struct.
+
+    Attributes:
+        instance_name: The covergroup instance name (e.g. ``"cXs_cg"``).
+        coverpoints:   List of PssCoverPoint.
+        crosses:       List of PssCoverCross.
+    """
+    instance_name: str
+    coverpoints: list  # list[PssCoverPoint]
+    crosses: list = dataclasses.field(default_factory=list)  # list[PssCoverCross]

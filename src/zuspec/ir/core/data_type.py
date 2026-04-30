@@ -61,6 +61,9 @@ class DataTypeStruct(DataType):
     fields : List[Field] = dc.field(default_factory=list)
     functions : List = dc.field(default_factory=list)
     is_abstract : bool = dc.field(default=False)
+    flow_kind : Optional[str] = dc.field(default=None)  # "buffer"|"stream"|"state"|"resource"|None
+    has_initial_constraint : bool = dc.field(default=False)  # True when a ConstraintBlock references the `initial` keyword
+    covergroups : List = dc.field(default_factory=list)  # list[PssCoverGroup]
 #    constraints
 
 @dc.dataclass(kw_only=True)
@@ -99,6 +102,8 @@ class DataTypeComponent(DataTypeClass):
     """Components are structural building blocks that can have ports, exports, 
     and bindings. The bind_map captures connections between ports/exports."""
     bind_map : List['Bind'] = dc.field(default_factory=list)
+    pools : List['Pool'] = dc.field(default_factory=list)
+    pool_binds : List['PoolBind'] = dc.field(default_factory=list)
     sync_processes : List[Function] = dc.field(default_factory=list)
     comb_processes : List[Function] = dc.field(default_factory=list)
     wire_processes : List[Function] = dc.field(default_factory=list)
@@ -122,7 +127,7 @@ class DataTypeExtern(DataTypeComponent):
     extern_name: Optional[str] = dc.field(default=None)
 
 if TYPE_CHECKING:
-    from .fields import Bind
+    from .fields import Bind, Pool, PoolBind
 
 @dc.dataclass(kw_only=True)
 class DataTypeExpr(DataType):

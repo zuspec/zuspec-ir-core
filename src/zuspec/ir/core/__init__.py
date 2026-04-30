@@ -52,7 +52,7 @@ from .domain_node import DomainNode
 from .connection import Connection, Signal, Bundle, MethodInterface
 
 # Re-export data model types
-from .fields import Bind, BindSet, Field, FieldInOut, FieldKind, SignalDirection
+from .fields import Bind, BindSet, Field, FieldInOut, FieldKind, SignalDirection, Pool, PoolBind
 from .data_type import (
     DataType, DataTypeInt, DataTypeUptr, DataTypeStruct, DataTypeClass, DataTypeAction, DataTypeComponent, DataTypeExtern,
     DataTypeExpr, DataTypeEnum, DataTypeString, DataTypeChandle,
@@ -127,7 +127,7 @@ from .activity import (
 
 __all__ = [
     "profile","Base","BaseP","Visitor","JsonConverter","json_converter",
-    "Bind","BindSet","Field","FieldInOut","FieldKind","SignalDirection",
+    "Bind","BindSet","Field","FieldInOut","FieldKind","SignalDirection","Pool","PoolBind",
     "DataType","DataTypeInt","DataTypeUptr","DataTypeStruct","DataTypeClass","DataTypeAction","DataTypeComponent","DataTypeExtern",
     "DataTypeExpr","DataTypeEnum","DataTypeString","DataTypeChandle",
     "DataTypeList","DataTypeArray","DataTypeMap","DataTypeSet",

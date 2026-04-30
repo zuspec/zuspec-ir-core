@@ -165,6 +165,8 @@ class ActivityAnonTraversal(ActivityStmt):
     label: Optional[str] = dc.field(default=None)
     inline_constraints: List['Expr'] = dc.field(default_factory=list)
     action_type_cls: Optional[type] = dc.field(default=None)
+    # WI-6: optional component-override expression from ``do T with comp == expr;``
+    comp_expr: Optional['Expr'] = dc.field(default=None)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitActivityAnonTraversal(self)
@@ -298,6 +300,7 @@ class ActivitySelect(ActivityStmt):
     Maps to PSS ``select { ... }``.
     """
     branches: List[SelectBranch] = dc.field(default_factory=list)
+    allow_none: bool = dc.field(default=False)  # True when a ``constraint { label.allow_none == true; }`` is present
 
     def accept(self, v: 'Visitor') -> None:
         v.visitActivitySelect(self)
@@ -323,8 +326,11 @@ class ActivityIfElse(ActivityStmt):
 
 @dc.dataclass(kw_only=True)
 class MatchCase(Base):
-    """One case of a ``match`` statement."""
-    pattern: 'Expr' = dc.field()
+    """One case of a ``match`` statement.
+
+    ``pattern`` is ``None`` for the ``default`` case.
+    """
+    pattern: 'Optional[Expr]' = dc.field(default=None)
     body: List[ActivityStmt] = dc.field(default_factory=list)
 
     def accept(self, v: 'Visitor') -> None:
@@ -395,4 +401,53 @@ __all__ = [
     "ActivityMatch",
     "ActivityConstraint",
     "ActivityBind",
+    "ActivityFill",
+    "ActivityChain",
+    "ActivityConstraintForall",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 additions
+# ---------------------------------------------------------------------------
+
+@dc.dataclass(kw_only=True)
+class ActivityFill(ActivityStmt):
+    """Bounded coverage-fill loop -- PSS section 12.9.
+
+    Repeats body until all required bins in the coverage model are hit,
+    or max_iters is reached (whichever comes first).
+    """
+    body: List[ActivityStmt] = dc.field(default_factory=list)
+    max_iters: int = dc.field(default=1000)
+
+    def accept(self, v: 'Visitor') -> None:
+        v.visitActivityFill(self)
+
+
+@dc.dataclass(kw_only=True)
+class ActivityChain(ActivityStmt):
+    """Chain statement -- PSS section 12.2.2.
+
+    Sequential actions connected by automatic flow-object forwarding:
+    the output of each action is passed as the input of the next.
+    """
+    label: Optional[str] = dc.field(default=None)
+    stmts: List[ActivityStmt] = dc.field(default_factory=list)
+
+    def accept(self, v: 'Visitor') -> None:
+        v.visitActivityChain(self)
+
+
+@dc.dataclass(kw_only=True)
+class ActivityConstraintForall(ActivityStmt):
+    """Forall constraint -- PSS section 12.7.
+
+    ``constraint forall (var : Type) { body_exprs }``
+    """
+    var_name: str = dc.field()
+    type_name: str = dc.field()
+    body_exprs: List['Expr'] = dc.field(default_factory=list)
+
+    def accept(self, v: 'Visitor') -> None:
+        v.visitActivityConstraintForall(self)
