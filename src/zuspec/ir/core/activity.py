@@ -28,7 +28,7 @@ Node hierarchy::
 from __future__ import annotations
 
 import dataclasses as dc
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from .base import Base
 
@@ -151,15 +151,16 @@ class ActivityTraversal(ActivityStmt):
 
 @dc.dataclass(kw_only=True)
 class ActivityAnonTraversal(ActivityStmt):
-    """Anonymous traversal by action type — ``await do(Type)``.
+    """Anonymous traversal by action type — ``await T()``.
 
     Corresponds to PSS ``do Type;`` or ``label: do Type with { ... };``.
 
     Attributes:
         action_type:        Qualified type name string (e.g. ``"WriteAction"``).
-        label:              Optional label when assigned (``x = await do(T)`` or
-                            ``with do(T) as x:``).
+        label:              Optional label when assigned (``x = await T()`` or
+                            ``with T() as x:``).
         inline_constraints: Constraint expressions from the ``with`` body.
+        init_bindings:      Flow bindings from keyword args (``await T(field=label.attr)``).
     """
     action_type: str = dc.field()
     label: Optional[str] = dc.field(default=None)
@@ -167,6 +168,9 @@ class ActivityAnonTraversal(ActivityStmt):
     action_type_cls: Optional[type] = dc.field(default=None)
     # WI-6: optional component-override expression from ``do T with comp == expr;``
     comp_expr: Optional['Expr'] = dc.field(default=None)
+    init_bindings: List[Tuple[str, str, str]] = dc.field(default_factory=list)
+    # Each tuple: (target_field_name, src_label, src_attr)
+    # e.g. ("fetch", "fetch", "result") for fetch=fetch.result
 
     def accept(self, v: 'Visitor') -> None:
         v.visitActivityAnonTraversal(self)

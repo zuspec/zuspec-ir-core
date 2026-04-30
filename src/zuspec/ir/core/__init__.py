@@ -84,6 +84,8 @@ from .expr import (
     ExprStaticRef, ExprCompileHas, ExprNull,
     # Interface-protocol expressions
     CompletionAwaitExpr, QueueGetExpr,
+    # zdc built-in typed IR nodes
+    ExprSext, ExprZext, ExprCbit, ExprSigned,
 )
 from .expr_phase2 import (
     ExprList, ExprTuple, ExprDict, ExprSet, Comprehension, ExprListComp,
@@ -155,6 +157,8 @@ __all__ = [
     "ExprStaticRef","ExprCompileHas","ExprNull",
     # Interface-protocol expressions
     "CompletionAwaitExpr","QueueGetExpr",
+    # zdc built-in typed IR nodes
+    "ExprSext","ExprZext","ExprCbit","ExprSigned",
     "Stmt","StmtExpr","StmtAssign","StmtAnnAssign","StmtAugAssign","StmtReturn","StmtIf","StmtFor","StmtWhile",
     "StmtBreak","StmtContinue","StmtPass","StmtRaise","StmtAssert","StmtAssume","StmtCover","StmtUnique","Alias","Arg","Arguments",
     # PSS-specific statements
