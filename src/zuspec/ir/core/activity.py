@@ -28,6 +28,7 @@ Node hierarchy::
 from __future__ import annotations
 
 import dataclasses as dc
+import enum
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from .base import Base
@@ -41,17 +42,24 @@ if TYPE_CHECKING:
 # Join specification (used by parallel / schedule)
 # ---------------------------------------------------------------------------
 
+class JoinKind(enum.Enum):
+    """Join policy for a parallel or schedule block"""
+    ALL    = enum.auto()
+    NONE   = enum.auto()
+    FIRST  = enum.auto()
+    SELECT = enum.auto()
+    BRANCH = enum.auto()
+
 @dc.dataclass(kw_only=True)
 class JoinSpec(Base):
     """Specifies the join policy for a parallel or schedule block.
 
     Attributes:
-        kind:         One of ``"all"`` (default), ``"branch"``, ``"none"``,
-                      ``"select"``, or ``"first"``.
-        branch_label: Target label for ``kind="branch"``.
-        count:        Branch count for ``kind="select"`` or ``"first"``.
+        kind:         Join policy (default ``JoinKind.ALL``).
+        branch_label: Target label for ``kind=JoinKind.BRANCH``.
+        count:        Branch count for ``kind=JoinKind.SELECT`` or ``JoinKind.FIRST``.
     """
-    kind: str = dc.field(default="all")
+    kind: JoinKind = dc.field(default=JoinKind.ALL)
     branch_label: Optional[str] = dc.field(default=None)
     count: Optional['Expr'] = dc.field(default=None)
 

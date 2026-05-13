@@ -7,7 +7,22 @@ by downstream synthesis passes.  They do not affect ``rt`` execution.
 from __future__ import annotations
 
 import dataclasses as dc
+import enum
 from typing import Any, List, Optional
+
+
+class HazardOpKind(enum.Enum):
+    """Hazard operation kind for async pipeline resource tracking"""
+    RESERVE = enum.auto()
+    BLOCK   = enum.auto()
+    WRITE   = enum.auto()
+    RELEASE = enum.auto()
+    ACQUIRE = enum.auto()
+
+class AccessDir(enum.Enum):
+    """Direction of a resource access"""
+    READ  = enum.auto()
+    WRITE = enum.auto()
 
 
 @dc.dataclass
@@ -36,10 +51,10 @@ class IrStage:
 @dc.dataclass
 class IrHazardOp:
     """Any hazard operation: reserve, block, write, release, or acquire."""
-    op: str                      # "reserve" | "block" | "write" | "release" | "acquire"
+    op: HazardOpKind
     resource_expr: Any           # AST expression for ``resource[addr]``
-    mode: str = "write"          # "read" or "write"
-    value_expr: Any = None       # only for ``op == "write"``
+    mode: AccessDir = AccessDir.WRITE
+    value_expr: Any = None       # only for ``op == HazardOpKind.WRITE``
     result_var: Optional[str] = None   # variable receiving the result (for block/acquire)
     result_width: int = 32             # bit-width of result_var
 

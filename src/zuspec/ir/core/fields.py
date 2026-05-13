@@ -28,6 +28,34 @@ class SignalDirection(enum.Enum):
     OUTPUT = enum.auto()
     INOUT = enum.auto()
 
+class RandKind(enum.Enum):
+    """Randomisation kind for a field"""
+    RAND  = enum.auto()   # random
+    RANDC = enum.auto()   # random-cyclic
+
+class FieldMetaKind(enum.Enum):
+    """Kind value stored in Python dataclasses.field metadata under the 'kind' key"""
+    FLOW_REF        = enum.auto()
+    RESOURCE_REF    = enum.auto()
+    POOL            = enum.auto()
+    INDEXED_REGFILE = enum.auto()
+    INDEXED_POOL    = enum.auto()
+    INSTANCE        = enum.auto()
+    REG             = enum.auto()
+    ARRAY           = enum.auto()
+    CONST           = enum.auto()
+    BUNDLE          = enum.auto()
+    MIRROR          = enum.auto()
+    MONITOR         = enum.auto()
+    PORT            = enum.auto()
+    EXPORT          = enum.auto()
+    TUPLE           = enum.auto()
+
+class ClaimMode(enum.Enum):
+    """Resource claim mode (mirrors FieldKind.Lock / FieldKind.Share)"""
+    LOCK  = enum.auto()   # exclusive
+    SHARE = enum.auto()   # concurrent-read
+
 @dc.dataclass
 class Bind(Base):
     lhs : Expr = dc.field()
@@ -52,7 +80,7 @@ class Field(Base):
     is_reg : bool = dc.field(default=False)    # True for Reg[T] register fields
     
     # Constraint solver metadata
-    rand_kind : Optional[str] = dc.field(default=None)  # "rand", "randc", or None
+    rand_kind : Optional[RandKind] = dc.field(default=None)  # RAND, RANDC, or None
     domain : Optional[tuple] = dc.field(default=None)  # Domain constraint (min, max) tuple or list of values
     size : Optional[int] = dc.field(default=None)  # Array size (for fixed-size arrays)
     max_size : Optional[int] = dc.field(default=None)  # Maximum size for variable-size arrays
@@ -69,6 +97,7 @@ class Field(Base):
 @dc.dataclass(kw_only=True)
 class FieldInOut(Field):
     is_out : bool = dc.field()
+    is_inout : bool = dc.field(default=False)
 
 
 

@@ -16,6 +16,19 @@ class ProcessKind(enum.Enum):
     SYNC = enum.auto()  # Synchronous (clocked) logic
     WIRE = enum.auto()  # Continuous assignment (from @property getter)
 
+class FlowKind(enum.Enum):
+    """Kind of PSS flow-object struct"""
+    BUFFER   = enum.auto()
+    STREAM   = enum.auto()
+    STATE    = enum.auto()
+    RESOURCE = enum.auto()
+
+class AccessMode(enum.Enum):
+    """Register access-mode (maps to the ACC template parameter of reg_c)"""
+    READWRITE = enum.auto()
+    READONLY  = enum.auto()
+    WRITEONLY = enum.auto()
+
 @dc.dataclass(kw_only=True)
 class DataType(Base):
     name : Optional[str] = dc.field(default=None)
@@ -61,7 +74,7 @@ class DataTypeStruct(DataType):
     fields : List[Field] = dc.field(default_factory=list)
     functions : List = dc.field(default_factory=list)
     is_abstract : bool = dc.field(default=False)
-    flow_kind : Optional[str] = dc.field(default=None)  # "buffer"|"stream"|"state"|"resource"|None
+    flow_kind : Optional[FlowKind] = dc.field(default=None)
     has_initial_constraint : bool = dc.field(default=False)  # True when a ConstraintBlock references the `initial` keyword
     covergroups : List = dc.field(default_factory=list)  # list[PssCoverGroup]
 #    constraints
@@ -441,7 +454,7 @@ class DataTypeRegister(DataTypeComponent):
     """
     # Core register parameters (extracted from template args for direct access)
     register_value_type : DataType = dc.field()  # Type R parameter
-    access_mode : str = dc.field(default="READWRITE")  # ACC parameter (READWRITE, READONLY, WRITEONLY)
+    access_mode : AccessMode = dc.field(default=AccessMode.READWRITE)  # ACC parameter
     size_bits : int = dc.field()  # SZ2 parameter
     
     # Template information (for tools that need full template context)
@@ -473,7 +486,7 @@ class DataTypeRegister(DataTypeComponent):
         if param_name == 'R':
             return self.register_value_type
         elif param_name == 'ACC':
-            return self.access_mode
+            return self.access_mode.name
         elif param_name == 'SZ2' or param_name == 'SZ':
             return self.size_bits
         return None

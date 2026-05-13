@@ -52,7 +52,7 @@ from .domain_node import DomainNode
 from .connection import Connection, Signal, Bundle, MethodInterface
 
 # Re-export data model types
-from .fields import Bind, BindSet, Field, FieldInOut, FieldKind, SignalDirection, Pool, PoolBind
+from .fields import Bind, BindSet, Field, FieldInOut, FieldKind, SignalDirection, RandKind, FieldMetaKind, ClaimMode, Pool, PoolBind
 from .data_type import (
     DataType, DataTypeInt, DataTypeUptr, DataTypeStruct, DataTypeClass, DataTypeAction, DataTypeComponent, DataTypeExtern,
     DataTypeExpr, DataTypeEnum, DataTypeString, DataTypeChandle,
@@ -61,7 +61,7 @@ from .data_type import (
     DataTypeAddressSpace, DataTypeAddrHandle, DataTypeProtocol, DataTypeRef,
     DataTypeGetIF, DataTypePutIF, DataTypeChannel, DataTypeTuple, DataTypeTupleReturn,
     DataTypeClaimPool,
-    Function, Process, ProcessKind,
+    Function, Process, ProcessKind, FlowKind, AccessMode,
     # Template support
     TemplateParamKind, TemplateParam, TemplateParamType, TemplateParamValue, TemplateParamEnum,
     TemplateArg, TemplateArgType, TemplateArgValue, TemplateArgEnum,
@@ -104,6 +104,7 @@ from .stmt import (
     SpawnStmt, SelectStmt, CompletionSetStmt, QueuePutStmt,
 )
 from .activity import (
+    JoinKind,
     JoinSpec,
     ActivityStmt,
     ActivitySequenceBlock,
@@ -126,10 +127,16 @@ from .activity import (
     ActivityConstraint,
     ActivityBind,
 )
+from .pipeline_async import (
+    HazardOpKind, AccessDir,
+    IrPipeline, IrStage, IrHazardOp, IrIngressOp, IrEgressOp,
+    IrStall, IrBubble, IrInFlightSearch,
+)
 
 __all__ = [
     "profile","Base","BaseP","Visitor","JsonConverter","json_converter",
-    "Bind","BindSet","Field","FieldInOut","FieldKind","SignalDirection","Pool","PoolBind",
+    "Bind","BindSet","Field","FieldInOut","FieldKind","SignalDirection",
+    "RandKind","FieldMetaKind","ClaimMode","Pool","PoolBind",
     "DataType","DataTypeInt","DataTypeUptr","DataTypeStruct","DataTypeClass","DataTypeAction","DataTypeComponent","DataTypeExtern",
     "DataTypeExpr","DataTypeEnum","DataTypeString","DataTypeChandle",
     "DataTypeList","DataTypeArray","DataTypeMap","DataTypeSet",
@@ -137,7 +144,7 @@ __all__ = [
     "DataTypeAddressSpace","DataTypeAddrHandle","DataTypeProtocol","DataTypeRef",
     "DataTypeGetIF","DataTypePutIF","DataTypeChannel","DataTypeTuple","DataTypeTupleReturn",
     "DataTypeClaimPool",
-    "Function","Process","ProcessKind",
+    "Function","Process","ProcessKind","FlowKind","AccessMode",
     # Template support
     "TemplateParamKind","TemplateParam","TemplateParamType","TemplateParamValue","TemplateParamEnum",
     "TemplateArg","TemplateArgType","TemplateArgValue","TemplateArgEnum",
@@ -171,7 +178,7 @@ __all__ = [
 "ExprJoinedStr","ExprFormattedValue","StmtMatch","StmtMatchCase","Pattern","PatternValue","PatternAs","PatternOr","PatternSequence",
 "Context",
     # Activity IR nodes
-    "JoinSpec",
+    "JoinKind","JoinSpec",
     "ActivityStmt","ActivitySequenceBlock","ActivityParallel","ActivitySchedule","ActivityAtomic",
     "ActivityTraversal","ActivityAnonTraversal","ActivitySuper",
     "ActivityRepeat","ActivityDoWhile","ActivityWhileDo","ActivityForeach","ActivityReplicate",
@@ -180,6 +187,10 @@ __all__ = [
     "ActivityConstraint","ActivityBind",
     # M0 foundations
     "Provenance","DomainNode","Connection","Signal","Bundle","MethodInterface",
+    # Pipeline async IR
+    "HazardOpKind","AccessDir",
+    "IrPipeline","IrStage","IrHazardOp","IrIngressOp","IrEgressOp",
+    "IrStall","IrBubble","IrInFlightSearch",
 ]
 
 # Important to place after all data-model classes have been imported

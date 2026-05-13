@@ -64,7 +64,6 @@ class ExprRef(Expr):
 @dc.dataclass(kw_only=True)
 class ExprConstant(Expr):
     value: object = dc.field()
-    kind: Optional[str] = dc.field(default=None)
 
 @dc.dataclass
 class TypeExprRefSelf(ExprRef): 
