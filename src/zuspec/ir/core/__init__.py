@@ -133,6 +133,17 @@ from .pipeline_async import (
     IrStall, IrBubble, IrInFlightSearch,
 )
 
+# Abstraction lowering infrastructure (interface-dispatch architecture)
+from .interfaces import (
+    Lowerable,
+    ElaboratableInterface,
+    SVEmittableInterface,
+    SVAEmittableInterface,
+    CSimEmittableInterface,
+)
+from .abstraction_field_ir import AbstractionFieldIR
+from .registry import LoweringRegistry, global_registry
+
 __all__ = [
     "profile","Base","BaseP","Visitor","JsonConverter","json_converter",
     "Bind","BindSet","Field","FieldInOut","FieldKind","SignalDirection",
@@ -191,6 +202,10 @@ __all__ = [
     "HazardOpKind","AccessDir",
     "IrPipeline","IrStage","IrHazardOp","IrIngressOp","IrEgressOp",
     "IrStall","IrBubble","IrInFlightSearch",
+    # Abstraction lowering interfaces
+    "Lowerable","ElaboratableInterface","SVEmittableInterface",
+    "SVAEmittableInterface","CSimEmittableInterface",
+    "AbstractionFieldIR","LoweringRegistry","global_registry",
 ]
 
 # Important to place after all data-model classes have been imported
