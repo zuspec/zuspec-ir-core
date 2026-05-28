@@ -2,7 +2,7 @@ from __future__ import annotations
 import dataclasses as dc
 import inspect
 import logging
-from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable, Optional, Any, Type
+from typing import TYPE_CHECKING, Iterable, Protocol, Self, cast, runtime_checkable, Optional, Any, Type
 
 if TYPE_CHECKING:
     from .visitor import Visitor
@@ -24,6 +24,21 @@ class BaseP(Protocol):
     def accept(self, v : Visitor): ...
 
     def getLoc(self) -> Optional[Loc]: ...
+
+
+def merge_loc(nodes: Iterable["BaseP"]) -> Optional[Loc]:
+    """Return the first non-None ``loc`` from *nodes*, or ``None`` if all are ``None``.
+
+    Useful when a synthesis pass merges several source nodes into one new node
+    and needs to pick a representative source location::
+
+        new_node.loc = merge_loc([src_a, src_b, src_c])
+    """
+    for node in nodes:
+        loc = node.getLoc()
+        if loc is not None:
+            return loc
+    return None
 
 
 @dc.dataclass(kw_only=True)
@@ -65,3 +80,17 @@ class Base(BaseP):
 
     def getLoc(self) -> Optional[Loc]:
         return self.loc
+
+    def copy_loc(self, other: "BaseP") -> "Self":
+        """Copy the ``loc`` from *other* onto ``self`` and return ``self`` (fluent).
+
+        When ``other.loc`` is ``None`` the existing ``self.loc`` is left
+        unchanged so that a node with an explicit location is never silently
+        erased::
+
+            new_node = MyNode(...).copy_loc(source_node)
+        """
+        src_loc = other.getLoc()
+        if src_loc is not None:
+            self.loc = src_loc
+        return self

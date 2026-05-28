@@ -187,3 +187,7 @@ profile(__name__)
 
 # Note: 'fe' module is only available in zuspec.ir.core, not the old zuspec.dataclasses.ir
 # from . import fe
+
+# R3: stable IR serialization boundary
+from .serializer import IRSerializer
+from .deserializer import IRDeserializer, IRDeserializeError
