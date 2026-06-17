@@ -486,7 +486,9 @@ class DataTypeRegister(DataTypeComponent):
         if param_name == 'R':
             return self.register_value_type
         elif param_name == 'ACC':
-            return self.access_mode.name
+            # access_mode may be an AccessMode enum or a plain string (pssc's
+            # ast2ir stores the parsed ACC parameter as a string).
+            return getattr(self.access_mode, 'name', self.access_mode)
         elif param_name == 'SZ2' or param_name == 'SZ':
             return self.size_bits
         return None
