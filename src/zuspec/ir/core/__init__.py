@@ -133,6 +133,16 @@ from .pipeline_async import (
     IrStall, IrBubble, IrInFlightSearch,
 )
 
+# Scenario Runtime IR — Layer-1 `scenario` dialect (PSS lowering waist)
+from .scenario import (
+    ScStmt, ScCoroutine, ScExecBlock,
+    ScSeq, ScPar, ScSelectBranch, ScSelect, ScLoop, ScAtomic,
+    ScIf, ScMatchCase, ScMatch,
+    ScInvoke, ScSpawn, ScJoin, ScWait, ScImport, ScImportDecl,
+    ScSolveVar, ScSolveProblem,
+    ScActionInst, ScComponentInst, ScenarioModule,
+)
+
 # Abstraction lowering infrastructure (interface-dispatch architecture)
 from .interfaces import (
     Lowerable,
@@ -202,6 +212,13 @@ __all__ = [
     "HazardOpKind","AccessDir",
     "IrPipeline","IrStage","IrHazardOp","IrIngressOp","IrEgressOp",
     "IrStall","IrBubble","IrInFlightSearch",
+    # Scenario Runtime IR (Layer-1 `scenario` dialect)
+    "ScStmt","ScCoroutine","ScExecBlock",
+    "ScSeq","ScPar","ScSelectBranch","ScSelect","ScLoop","ScAtomic",
+    "ScIf","ScMatchCase","ScMatch",
+    "ScInvoke","ScSpawn","ScJoin","ScWait","ScImport","ScImportDecl",
+    "ScSolveVar","ScSolveProblem",
+    "ScActionInst","ScComponentInst","ScenarioModule",
     # Abstraction lowering interfaces
     "Lowerable","ElaboratableInterface","SVEmittableInterface",
     "SVAEmittableInterface","CSimEmittableInterface",

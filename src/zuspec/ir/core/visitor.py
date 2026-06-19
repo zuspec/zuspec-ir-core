@@ -174,5 +174,94 @@ class Visitor:
         """Visit a QueueGetExpr node (default: no-op)."""
         pass
 
+    # ------------------------------------------------------------------
+    # Scenario Runtime IR (Layer-1 `scenario` dialect) visitor defaults.
+    # Defaults visit structured children via accept(); leaf ops are no-ops.
+    # ------------------------------------------------------------------
+
+    def visitScStmt(self, o):
+        o.visitDefault(self, type(o))
+
+    def visitScCoroutine(self, o):
+        for stmt in o.body:
+            stmt.accept(self)
+
+    def visitScExecBlock(self, o):
+        pass
+
+    def visitScSeq(self, o):
+        for stmt in o.body:
+            stmt.accept(self)
+
+    def visitScPar(self, o):
+        for stmt in o.branches:
+            stmt.accept(self)
+
+    def visitScSelectBranch(self, o):
+        for stmt in o.body:
+            stmt.accept(self)
+
+    def visitScSelect(self, o):
+        for branch in o.branches:
+            branch.accept(self)
+
+    def visitScLoop(self, o):
+        for stmt in o.body:
+            stmt.accept(self)
+
+    def visitScAtomic(self, o):
+        for stmt in o.body:
+            stmt.accept(self)
+
+    def visitScIf(self, o):
+        for stmt in o.then_body:
+            stmt.accept(self)
+        for stmt in o.else_body:
+            stmt.accept(self)
+
+    def visitScMatchCase(self, o):
+        for stmt in o.body:
+            stmt.accept(self)
+
+    def visitScMatch(self, o):
+        for case in o.cases:
+            case.accept(self)
+
+    def visitScInvoke(self, o):
+        pass
+
+    def visitScSpawn(self, o):
+        pass
+
+    def visitScJoin(self, o):
+        pass
+
+    def visitScWait(self, o):
+        pass
+
+    def visitScImport(self, o):
+        pass
+
+    def visitScImportDecl(self, o):
+        pass
+
+    def visitScSolveVar(self, o):
+        pass
+
+    def visitScSolveProblem(self, o):
+        for var in o.vars:
+            var.accept(self)
+
+    def visitScActionInst(self, o):
+        pass
+
+    def visitScComponentInst(self, o):
+        for child in o.children:
+            child.accept(self)
+
+    def visitScenarioModule(self, o):
+        for coro in o.coroutines.values():
+            coro.accept(self)
+
 
 
