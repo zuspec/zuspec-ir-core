@@ -49,7 +49,7 @@ def json_converter(pmod, *args, **kwargs):
 # M0 additions: provenance, pass infrastructure, connections, RTL IR
 from .provenance import Provenance
 from .domain_node import DomainNode
-from .connection import Connection, Signal, Bundle, MethodInterface
+from .connection import Connection, Signal, Bundle, MethodInterface, PortConnection, ModuleInstance
 
 # Re-export data model types
 from .fields import Bind, BindSet, Field, FieldInOut, FieldKind, SignalDirection, RandKind, FieldMetaKind, ClaimMode, Pool, PoolBind
@@ -86,6 +86,8 @@ from .expr import (
     CompletionAwaitExpr, QueueGetExpr,
     # zdc built-in typed IR nodes
     ExprSext, ExprZext, ExprCbit, ExprSigned,
+    # class-model (non-synthesizable) nodes
+    ExprNew,
 )
 from .expr_phase2 import (
     ExprList, ExprTuple, ExprDict, ExprSet, Comprehension, ExprListComp,
@@ -186,7 +188,7 @@ __all__ = [
     # Interface-protocol expressions
     "CompletionAwaitExpr","QueueGetExpr",
     # zdc built-in typed IR nodes
-    "ExprSext","ExprZext","ExprCbit","ExprSigned",
+    "ExprSext","ExprZext","ExprCbit","ExprSigned","ExprNew",
     "Stmt","StmtExpr","StmtAssign","StmtAnnAssign","StmtAugAssign","StmtReturn","StmtIf","StmtFor","StmtWhile",
     "StmtBreak","StmtContinue","StmtPass","StmtRaise","StmtAssert","StmtAssume","StmtCover","StmtUnique","Alias","Arg","Arguments",
     # PSS-specific statements
@@ -208,6 +210,7 @@ __all__ = [
     "ActivityConstraint","ActivityBind",
     # M0 foundations
     "Provenance","DomainNode","Connection","Signal","Bundle","MethodInterface",
+    "PortConnection","ModuleInstance",
     # Pipeline async IR
     "HazardOpKind","AccessDir",
     "IrPipeline","IrStage","IrHazardOp","IrIngressOp","IrEgressOp",

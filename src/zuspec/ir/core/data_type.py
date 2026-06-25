@@ -115,6 +115,9 @@ class DataTypeComponent(DataTypeClass):
     """Components are structural building blocks that can have ports, exports, 
     and bindings. The bind_map captures connections between ports/exports."""
     bind_map : List['Bind'] = dc.field(default_factory=list)
+    # Structural sub-module instantiations (self-contained: module name + explicit
+    # port->signal map; used to assemble a top from text-emitted + IR modules).
+    module_instances : List['ModuleInstance'] = dc.field(default_factory=list)
     pools : List['Pool'] = dc.field(default_factory=list)
     pool_binds : List['PoolBind'] = dc.field(default_factory=list)
     sync_processes : List[Function] = dc.field(default_factory=list)

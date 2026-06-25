@@ -48,3 +48,39 @@ class MethodInterface(Connection):
 
     req: List[Signal] = dc.field(default_factory=list)
     resp: List[Signal] = dc.field(default_factory=list)
+
+
+@dc.dataclass
+class PortConnection:
+    """One ``.port(signal)`` of a structural module instantiation.
+
+    Args:
+        port: The instantiated module's port name.
+        signal: The enclosing module's signal/net wired to it.
+    """
+
+    port: str = dc.field()
+    signal: str = dc.field()
+
+
+@dc.dataclass
+class ModuleInstance:
+    """A *structural* sub-module instantiation, self-contained for emission.
+
+    Unlike ``inst()`` component fields (which resolve the instantiated type from
+    the IR ``Context``), a ``ModuleInstance`` names its target module as a string
+    and carries an explicit port→signal map.  This lets a structural top assemble
+    modules that are **not** IR components — e.g. a text-emitted regblock core —
+    alongside ones that are (an IR-lowered engine).  ``DataTypeComponent`` holds a
+    list of these in ``module_instances``; the SV back end emits one
+    ``<module> <name> ( .port(signal), ... );`` per instance.
+
+    Args:
+        module: Target module (the instantiated module's name).
+        name: Instance name.
+        connections: Ordered ``.port(signal)`` connections.
+    """
+
+    module: str = dc.field()
+    name: str = dc.field()
+    connections: List[PortConnection] = dc.field(default_factory=list)

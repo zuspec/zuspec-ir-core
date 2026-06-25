@@ -438,3 +438,20 @@ class ExprSigned(Expr):
     """
     value: Expr = dc.field()
 
+
+@dc.dataclass(kw_only=True)
+class ExprNew(Expr):
+    """Object allocation: ``obj = new(args)`` (non-synthesizable class model).
+
+    Represents construction of a class instance. Backends lower this to
+    allocate storage for *datatype*, bind the virtual-function table, and run
+    the constructor with *args*. The SW (C coroutine) backend routes the
+    allocation through the GC heap seam (``zsp_gc_alloc``) using a precise
+    type descriptor.
+
+    *datatype* is the concrete class being instantiated; *args* are the
+    constructor arguments.
+    """
+    datatype: 'DataType' = dc.field()  # Forward reference
+    args: list[Expr] = dc.field(default_factory=list)
+
