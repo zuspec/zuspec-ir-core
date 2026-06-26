@@ -259,6 +259,10 @@ class Function(Base):
     is_import : bool = dc.field(default=False)
     is_target : bool = dc.field(default=False)  # import target
     is_solve : bool = dc.field(default=False)   # import solve
+    # True when this routine must lower to an SV `task` (may consume time /
+    # contain blocking calls) rather than a `function`. Set by lowering for
+    # action body()/activity() and any routine with blocking semantics.
+    is_task : bool = dc.field(default=False)
     # Leading comment block from Python source (docstring or # lines above decorator)
     comment : Optional[str] = dc.field(default=None)
 

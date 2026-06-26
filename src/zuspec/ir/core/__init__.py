@@ -145,6 +145,13 @@ from .scenario import (
     ScActionInst, ScComponentInst, ScenarioModule,
 )
 
+# Structured constraint IR (D3) — first-class constraint model for SV emission
+from .constraint import (
+    Constraint, ConstraintExpr, ConstraintImplies, ConstraintIfElse,
+    ConstraintForeach, ConstraintUnique, ConstraintSoft, DistWeight,
+    ConstraintDist, ConstraintSolveBefore, ConstraintBlock,
+)
+
 # Abstraction lowering infrastructure (interface-dispatch architecture)
 from .interfaces import (
     Lowerable,
@@ -215,6 +222,10 @@ __all__ = [
     "HazardOpKind","AccessDir",
     "IrPipeline","IrStage","IrHazardOp","IrIngressOp","IrEgressOp",
     "IrStall","IrBubble","IrInFlightSearch",
+    # Structured constraint IR (D3)
+    "Constraint","ConstraintExpr","ConstraintImplies","ConstraintIfElse",
+    "ConstraintForeach","ConstraintUnique","ConstraintSoft","DistWeight",
+    "ConstraintDist","ConstraintSolveBefore","ConstraintBlock",
     # Scenario Runtime IR (Layer-1 `scenario` dialect)
     "ScStmt","ScCoroutine","ScExecBlock",
     "ScSeq","ScPar","ScSelectBranch","ScSelect","ScLoop","ScAtomic",
