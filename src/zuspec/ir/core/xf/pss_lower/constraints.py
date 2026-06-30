@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
+from ...constraint import Constraint, ConstraintExpr
 from ...data_type import DataTypeClass
 from ...fields import RandKind
 from ...scenario import ScCoroutine, ScSolveProblem, ScSolveVar
@@ -27,7 +28,7 @@ def collect_solve_problem(coro: ScCoroutine,
     """
     rand_fields = [f for f in dt.fields if getattr(f, "rand_kind", None) is not None]
 
-    constraints: List = []
+    constraints: List[Constraint] = []
     for fn in coro.pending_constraints:
         for st in getattr(fn, "body", []) or []:
             expr = getattr(st, "expr", None)
@@ -36,7 +37,9 @@ def collect_solve_problem(coro: ScCoroutine,
                     "constraint %r holds a non-expression statement %s"
                     % (getattr(fn, "name", "?"), type(st).__name__),
                     loc=getattr(st, "loc", None))
-            constraints.append(expr)
+            # Wrap the boolean expr as structured constraint IR. Richer forms
+            # (implies/foreach/unique/soft/dist) attach here in later phases.
+            constraints.append(ConstraintExpr(expr=expr))
 
     if not rand_fields and not constraints:
         return None

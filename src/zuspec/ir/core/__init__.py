@@ -141,8 +141,9 @@ from .scenario import (
     ScSeq, ScPar, ScSelectBranch, ScSelect, ScLoop, ScAtomic,
     ScIf, ScMatchCase, ScMatch,
     ScInvoke, ScSpawn, ScJoin, ScWait, ScImport, ScImportDecl,
-    ScSolveVar, ScSolveProblem,
-    ScActionInst, ScComponentInst, ScenarioModule,
+    ScSolveVar, SolveStrategy, SolveInject, ScSolveProblem,
+    ScActionInst, ScComponentInst,
+    HarnessKind, SeedSource, ScRootAction, ScHarness, ScenarioModule,
 )
 
 # Structured constraint IR (D3) — first-class constraint model for SV emission
@@ -231,8 +232,9 @@ __all__ = [
     "ScSeq","ScPar","ScSelectBranch","ScSelect","ScLoop","ScAtomic",
     "ScIf","ScMatchCase","ScMatch",
     "ScInvoke","ScSpawn","ScJoin","ScWait","ScImport","ScImportDecl",
-    "ScSolveVar","ScSolveProblem",
-    "ScActionInst","ScComponentInst","ScenarioModule",
+    "ScSolveVar","SolveStrategy","SolveInject","ScSolveProblem",
+    "ScActionInst","ScComponentInst",
+    "HarnessKind","SeedSource","ScRootAction","ScHarness","ScenarioModule",
     # Abstraction lowering interfaces
     "Lowerable","ElaboratableInterface","SVEmittableInterface",
     "SVAEmittableInterface","CSimEmittableInterface",

@@ -248,9 +248,14 @@ class Visitor:
     def visitScSolveVar(self, o):
         pass
 
+    def visitSolveInject(self, o):
+        pass
+
     def visitScSolveProblem(self, o):
         for var in o.vars:
             var.accept(self)
+        for inj in o.inject:
+            inj.accept(self)
 
     def visitScActionInst(self, o):
         pass
@@ -259,9 +264,20 @@ class Visitor:
         for child in o.children:
             child.accept(self)
 
+    def visitScRootAction(self, o):
+        pass
+
+    def visitScHarness(self, o):
+        if o.comp_tree is not None:
+            o.comp_tree.accept(self)
+        for root in o.roots:
+            root.accept(self)
+
     def visitScenarioModule(self, o):
         for coro in o.coroutines.values():
             coro.accept(self)
+        for entry in o.entries:
+            entry.accept(self)
 
 
 
