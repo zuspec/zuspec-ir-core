@@ -29,7 +29,7 @@ from typing import List, Optional
 
 from ..scenario import (
     ScStmt, ScCoroutine, ScSeq, ScAtomic, ScLoop, ScIf, ScMatch,
-    ScWait, ScJoin, ScInvoke, ScPar, ScImport,
+    ScWait, ScJoin, ScInvoke, ScPar, ScSelect, ScImport,
 )
 from .validate import UnsupportedConstructError
 
@@ -62,12 +62,20 @@ class CoroutineFSMPass:
     """Decompose a coroutine into FSM blocks at suspend points."""
 
     # A ScPar suspends the parent: it spawns branches and blocks until the join
-    # condition, resuming in the next block.
-    _SUSPEND_TYPES = (ScWait, ScJoin, ScPar)
+    # condition, resuming in the next block. A ScSelect likewise suspends -- it
+    # runs the chosen branch as a blocking child and resumes when it returns.
+    _SUSPEND_TYPES = (ScWait, ScJoin, ScPar, ScSelect)
 
-    def __init__(self, blocking_targets=None):
+    def __init__(self, blocking_targets=None, allow_nested_suspend=False):
         # Names of sub-coroutines that block (so an ScInvoke of them suspends).
         self.blocking = set(blocking_targets or [])
+        # When True, a loop/branch that *contains* a suspend is kept opaque (a
+        # single structured stmt) instead of being rejected. A consumer that lowers
+        # to a flat, resumable code stream (the be-bc oracle, whose VM saves the pc
+        # across a suspend) can execute the back-edge + interior suspend directly;
+        # a stackless switch backend still needs the Phase-5 CFG split, so this
+        # stays off by default.
+        self.allow_nested_suspend = allow_nested_suspend
 
     # ------------------------------------------------------------------
     def is_suspend(self, s: ScStmt) -> bool:
@@ -103,7 +111,7 @@ class CoroutineFSMPass:
             if isinstance(s, (ScSeq, ScAtomic)):
                 out.extend(self._flatten(s.body))
             elif isinstance(s, (ScLoop, ScIf, ScMatch)):
-                if self._contains_suspend(s):
+                if self._contains_suspend(s) and not self.allow_nested_suspend:
                     raise UnsupportedConstructError(
                         "suspend point inside %s requires loop/branch-aware FSM "
                         "lowering (Phase 5)" % type(s).__name__,
