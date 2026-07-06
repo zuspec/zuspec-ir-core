@@ -331,9 +331,17 @@ class ScImportDecl(Base):
 
 @dc.dataclass(kw_only=True)
 class ScSolveVar(Base):
-    """A declared rand variable in a :class:`ScSolveProblem`."""
+    """A declared rand variable in a :class:`ScSolveProblem`.
+
+    ``var_id`` is the variable's index in the solver problem (rand fields only).
+    ``slot`` is the variable's index in the action's *full* field list -- i.e. its
+    object storage slot, the index a constraint's ``ExprRefField`` and procedural
+    ``LD_FIELD``/``ST_FIELD`` use. The two differ when non-rand fields are
+    interleaved among the rand fields; ``slot == -1`` means "unset -> equals
+    ``var_id``" (the rand-only-object case)."""
     name: str = dc.field()
     var_id: int = dc.field()
+    slot: int = dc.field(default=-1)
     width: int = dc.field(default=32)
     signed: bool = dc.field(default=False)
     domain: Optional['Expr'] = dc.field(default=None)
@@ -385,10 +393,16 @@ class ScSolveProblem(ScStmt):
         inject:      Pinned input values applied before solving.
         solve_before: ``solve <before> before <after>`` ordering pairs
                      (distribution only; lifted from ``ConstraintSolveBefore``).
+        arrays:      ``array_base_slot -> [element_slot, ...]`` map. A rand array
+                     is flattened into one ``ScSolveVar`` per element (each with its
+                     own object slot); this records, for every array field slot, the
+                     ordered element slots so ``foreach``/subscript lowering can
+                     resolve ``arr[i]`` to the right element var.
     """
     vars: List[ScSolveVar] = dc.field(default_factory=list)
     constraints: List['Constraint'] = dc.field(default_factory=list)
     writeback: Dict[str, int] = dc.field(default_factory=dict)
+    arrays: Dict[int, List[int]] = dc.field(default_factory=dict)
     strategy: SolveStrategy = dc.field(default=SolveStrategy.ELAB_NATIVE)
     seed: Optional['Expr'] = dc.field(default=None)
     members: List[str] = dc.field(default_factory=list)
