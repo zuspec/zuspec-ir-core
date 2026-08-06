@@ -301,8 +301,22 @@ class DataTypeTuple(DataType):
 
 @dc.dataclass(kw_only=True)
 class DataTypeChannel(DataType):
-    """Represents a TLM Channel - bidirectional communication channel"""
+    """Represents a TLM Channel - bidirectional communication channel
+
+    Also the target of PSS ``sync_pkg::channel_c<Te, DEPTH>`` (PSS 3.1 §21.9.1),
+    which is where ``depth`` comes from: a bounded FIFO whose capacity is part
+    of its *meaning*, not a tuning knob. A PSS model that declares ``DEPTH=1``
+    is asking for coalescing -- ``try_put`` failing once an item is pending is
+    the behaviour it relies on -- so a backend that substituted a larger buffer
+    would still compile and would stop matching the model.
+
+    ``depth`` is optional because not every front end states one: ``None`` means
+    "unspecified, backend decides". PSS requires a positive depth and the PSS
+    front end enforces that, so ``None`` here comes only from front ends whose
+    channels are genuinely unbounded-by-default.
+    """
     element_type : Optional[DataType] = dc.field(default=None)
+    depth : Optional[int] = dc.field(default=None)
 
 
 @dc.dataclass(kw_only=True)
