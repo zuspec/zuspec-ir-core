@@ -26,7 +26,11 @@ class Arguments(Base):
 
 @dc.dataclass(kw_only=True)
 class Stmt(Base):
+    #: Comment written above the statement, one entry per source line.
     comment: Optional[str] = dc.field(default=None)
+
+    #: Comment written after the statement on the same line -- `x = 1; // note`.
+    comment_trailing: Optional[str] = dc.field(default=None)
 
 @dc.dataclass(kw_only=True)
 class StmtExpr(Stmt):

@@ -45,6 +45,19 @@ def merge_loc(nodes: Iterable["BaseP"]) -> Optional[Loc]:
 class Base(BaseP):
     loc : Optional[Loc] = dc.field(default=None)
 
+    #: Documentation carried from the source the node was translated from --
+    #: the doc comment above a function, component, field or struct member.
+    #: Declared on the root so every declaration kind gets it, and so a
+    #: back end can emit it without knowing which kind it holds.
+    doc : Optional[str] = dc.field(default=None)
+
+    #: Documentation written *after* the declaration, on its own line --
+    #: ``rand bit[32] src;   // CHn_A0``. A separate slot rather than merged
+    #: into ``doc`` because a declaration routinely carries both and they are
+    #: emitted in different places: a register field's prose belongs above it,
+    #: its bit range and access mode beside it.
+    doc_trailing : Optional[str] = dc.field(default=None)
+
     def visitDefault(self, v : Visitor, cls : Optional[Type] = None):
         _log.debug("visitDefault %s %s" % (
             str(type(self).__name__), 
