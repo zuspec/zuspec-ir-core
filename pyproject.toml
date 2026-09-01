@@ -25,7 +25,3 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 
-# The version lives in __version__.py, not here: CI checks a release tag
-# against BASE in that file, and stamps SUFFIX for development builds.
-[tool.setuptools.dynamic]
-version = {attr = "zuspec.ir.core.__version__.VERSION"}
