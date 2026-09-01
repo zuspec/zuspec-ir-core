@@ -1,9 +1,16 @@
 [project]
 name = "zuspec-ir-core"
-version = "0.0.1"
+dynamic = ["version"]
 description = "Zuspec core intermediate representation"
 requires-python = ">=3.10"
-dependencies = []
+# PyYAML is imported at module scope by zuspec/ir/core/serializer.py, which
+# __init__.py imports unconditionally -- so `import zuspec.ir.core` fails
+# outright without it. It went unnoticed because every environment that
+# exercised this package also installed something that happened to pull PyYAML
+# in transitively; a minimal wheel-only install of pssc does not.
+dependencies = [
+    "PyYAML",
+]
 
 [build-system]
 requires = ["setuptools"]
@@ -17,3 +24,8 @@ namespaces = true
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
+
+# The version lives in __version__.py, not here: CI checks a release tag
+# against BASE in that file, and stamps SUFFIX for development builds.
+[tool.setuptools.dynamic]
+version = {attr = "zuspec.ir.core.__version__.VERSION"}
