@@ -1,0 +1,39 @@
+# CI for zuspec/zuspec-ir-core on GitHub Actions.
+#
+# Delegates to the estate's shared reusable workflow, the same way
+# zuspec-be-sv, zuspec-be-sw and zuspec-dataclasses do. Everything that makes
+# a release safe lives there and is therefore identical across the estate:
+# the release-authority gate reads dvkit.org/.well-known/release-authority.json
+# and fails closed on a `v*` tag it cannot resolve, and the publish step is
+# gated on BOTH `refs/tags/v*` and authority == 'github'. This repository is
+# not listed in that switch, so it takes the default, which is "github".
+#
+# version_dir points at the directory holding __version__.py. The shared
+# workflow rewrites SUFFIX there for non-tag builds, so a development wheel
+# carries a PEP 440 local segment and is unpublishable by construction, while
+# a tagged build publishes BASE unchanged.
+#
+# build_universal: this package is pure Python -- there is no compiled
+# extension and nothing platform-specific in the wheel -- so one
+# py3-none-any wheel serves every platform and build_linux is off.
+#
+# build_docs is false because this repository has no docs/ directory. Add it
+# here if one is ever written; there is no separate docs workflow to update.
+
+name: CI
+on:
+  - push
+  - pull_request
+  - workflow_dispatch
+jobs:
+  ci-linux:
+    uses: zuspec/zuspec-release/.github/workflows/zuspec-pybuild.yml@main
+    with:
+      version_dir: 'src/zuspec/ir/core'
+      build_universal: true
+      build_linux: false
+      build_docs: false
+      build_llms_txt: false
+    secrets:
+      PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+      LLMS_PAT: ${{ secrets.LLMS_PAT }}
