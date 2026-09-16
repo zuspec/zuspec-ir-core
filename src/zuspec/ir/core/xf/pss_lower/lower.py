@@ -26,6 +26,19 @@ _log = logging.getLogger("zuspec.ir.xf.pss_lower")
 _LIFECYCLE_FUNCS = ("body", "pre_solve", "post_solve")
 
 
+def _is_pending_constraint(f) -> bool:
+    """Does function *f* hold constraints that are in force on its type?
+
+    A non-lifecycle function on an action is assumed to be a named constraint
+    block. The exception is a generic constraint (PSS 3.1 §13.1.2), which is a
+    template: it is inert until referenced, so collecting it here would put a
+    body -- and its unbound parameters -- into the solve problem.
+    """
+    if getattr(f, "name", None) in _LIFECYCLE_FUNCS:
+        return False
+    return not (getattr(f, "metadata", None) or {}).get("_is_generic_constraint")
+
+
 def _get_type_map(ctx: Any) -> Dict[str, Any]:
     """Return the ``name -> DataType`` mapping from a Layer-0 container.
 
@@ -225,7 +238,7 @@ class PSSToScenarioPass:
                 pre_block = ScExecBlock(kind="pre_solve", stmts=list(f.body))
             elif fname == "post_solve":
                 post_block = ScExecBlock(kind="post_solve", stmts=list(f.body))
-            else:
+            elif _is_pending_constraint(f):
                 # A named constraint block (e.g. addr_aligned).  Carried until
                 # Phase 3 folds it into a ScSolveProblem.
                 pending.append(f)
@@ -294,8 +307,7 @@ class PSSToScenarioPass:
     def _lower_compound(self, qname: str, dt: DataTypeClass) -> ScCoroutine:
         simple = qname.rsplit("::", 1)[-1]
         # pending constraints (named constraint blocks on a compound action)
-        pending = [f for f in dt.functions
-                   if getattr(f, "name", None) not in _LIFECYCLE_FUNCS]
+        pending = [f for f in dt.functions if _is_pending_constraint(f)]
         body = self._lower_activity(dt.activity_ir)
         return ScCoroutine(
             name=simple, body=body, action_type=qname,

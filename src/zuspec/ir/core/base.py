@@ -5,6 +5,7 @@ import logging
 from typing import TYPE_CHECKING, Iterable, Protocol, Self, cast, runtime_checkable, Optional, Any, Type
 
 if TYPE_CHECKING:
+    from .provenance import Provenance
     from .visitor import Visitor
 
 _log = logging.getLogger("zuspec.ir.Base")
@@ -57,6 +58,17 @@ class Base(BaseP):
     #: emitted in different places: a register field's prose belongs above it,
     #: its bit range and access mode beside it.
     doc_trailing : Optional[str] = dc.field(default=None)
+
+    #: How this node came to exist, when it was *synthesized* rather than
+    #: translated one-for-one from source. ``loc`` answers "where in the source
+    #: is this?"; ``provenance`` answers "which pass made it, out of what?" --
+    #: the two are complementary, and a node instantiated from a template-like
+    #: construct has a useful ``loc`` (the declaration) and a useful
+    #: ``provenance`` (the reference that instantiated it) at the same time.
+    #:
+    #: Declared on the root for the same reason ``doc`` is: any node kind may be
+    #: synthesized, and a consumer should be able to ask without knowing which.
+    provenance : Optional["Provenance"] = dc.field(default=None)
 
     def visitDefault(self, v : Visitor, cls : Optional[Type] = None):
         _log.debug("visitDefault %s %s" % (

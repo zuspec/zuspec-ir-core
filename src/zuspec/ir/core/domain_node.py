@@ -9,16 +9,16 @@ from .base import Base
 
 if TYPE_CHECKING:
     from .connection import Connection
-    from .provenance import Provenance
 
 
 @dc.dataclass(kw_only=True)
 class DomainNode(Base):
     """Abstract base for domain-specific synthesis nodes.
 
-    Every ``DomainNode`` subclass must declare:
-    - ``lowered_by``: the ``Pass`` instance responsible for lowering it.
-    - ``provenance``: a ``Provenance`` recording how this node was introduced.
+    Every ``DomainNode`` subclass must declare ``lowered_by``: the ``Pass``
+    instance responsible for lowering it. ``provenance`` -- a ``Provenance``
+    recording how the node was introduced -- is inherited from ``Base``, where
+    it lives so that any synthesized node kind can carry it.
 
     Agnostic (ISA-unaware) passes must not call any method other than the
     inherited ``Base`` visitor interface.  They may inspect ``lowered_by``
@@ -26,7 +26,6 @@ class DomainNode(Base):
     """
 
     lowered_by: Optional[Any] = dc.field(default=None)
-    provenance: Optional["Provenance"] = dc.field(default=None)
 
     @abstractmethod
     def inputs(self) -> List["Connection"]:

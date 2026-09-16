@@ -14,11 +14,31 @@ class Provenance:
 
     Carries ``pass_name``, ``source_nodes`` (the IR nodes that were consumed
     to produce this node), and a human-readable ``description``.
+
+    ``source_nodes`` holds *live* IR nodes, which makes a provenance record a
+    back-edge out of the tree a consumer thinks it is walking: a generic
+    dataclass walk that descends into it reaches the source node's whole
+    subtree, and for a construct that instantiates itself, reaches a cycle.
+    Passes that only need to *name* their sources should therefore use
+    ``source_names``, which cannot be walked into.
     """
 
     pass_name: str = dc.field()
     source_nodes: List["BaseP"] = dc.field(default_factory=list)
     description: str = dc.field(default="")
+
+    #: The source constructs by name, innermost or outermost per the pass's own
+    #: convention. Inert by construction, so annotating a node with it cannot
+    #: change what walking that node finds -- which is the difference between a
+    #: provenance record and a graph edge.
+    source_names: List[str] = dc.field(default_factory=list)
+
+    #: Which *use* of ``source_nodes`` this node came from, when one pass
+    #: instantiates the same source more than once. Without it, two
+    #: instantiations of one declaration carry indistinguishable provenance and
+    #: a consumer cannot tell "these came from the same place" from "these came
+    #: from the same declaration, twice". Numbered per pass, from 1.
+    site: Optional[int] = dc.field(default=None)
 
     @classmethod
     def chain(
