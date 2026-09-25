@@ -11,7 +11,7 @@ from ...activity import (
     ActivityAtomic, ActivityParallel, ActivitySchedule, ActivitySelect,
 )
 from ...scenario import (
-    ScCoroutine, ScExecBlock, ScComponentInst, ScenarioModule,
+    ScCoroutine, ScExecBlock, ScComponentInst, ScenarioModule, ScField,
     ScSeq, ScInvoke, ScLoop, ScIf, ScMatch, ScMatchCase, ScAtomic,
     ScPar, ScSelect, ScSelectBranch, ScImport, ScImportDecl,
 )
@@ -54,6 +54,13 @@ def _get_type_map(ctx: Any) -> Dict[str, Any]:
     raise TypeError(
         "cannot find a type map on %r (expected .type_map / .type_m / dict)"
         % type(ctx).__name__)
+
+
+def _field_layout(dt: Any) -> List[ScField]:
+    """The action's attributes in object-slot order (the full field list)."""
+    return [ScField(name=f.name, slot=i, datatype=getattr(f, "datatype", None),
+                    rand=getattr(f, "rand_kind", None) is not None)
+            for i, f in enumerate(getattr(dt, "fields", []) or [])]
 
 
 def _walk_invokes(stmts):
@@ -147,6 +154,9 @@ class PSSToScenarioPass:
         if not owned:
             raise ValueError("root component %r owns no actions" % root)
 
+        # --- callable functions: package scope, then every component's ---
+        module.functions = self._collect_functions(ctx, type_map)
+
         # --- LifecycleNormalize ---
         for qname, dt in owned:
             self.validator.check_action(qname, dt)
@@ -166,6 +176,7 @@ class PSSToScenarioPass:
                         idx = 1
                     coro.body.insert(idx, problem)
                     coro.pending_constraints = []
+            coro.fields = _field_layout(dt)
             module.add_coroutine(coro)
 
         # --- export selection ---
@@ -175,6 +186,25 @@ class PSSToScenarioPass:
             module.export_actions = self._auto_exports(module)
 
         return module
+
+    @staticmethod
+    def _collect_functions(ctx: Any, type_map: Dict[str, Any]) -> Dict[str, Any]:
+        """Native functions exec code may call (see ``ScenarioModule.functions``).
+
+        Constraint blocks and exec blocks are also ``Function``s on a component;
+        they are not callable and are left out.
+        """
+        out: Dict[str, Any] = dict(getattr(ctx, "functions", {}) or {})
+        for qname, dt in type_map.items():
+            if not isinstance(dt, DataTypeComponent):
+                continue
+            for f in getattr(dt, "functions", []) or []:
+                meta = getattr(f, "metadata", None) or {}
+                if (f.name in _LIFECYCLE_FUNCS or meta.get("_is_constraint")
+                        or meta.get("_is_generic_constraint")):
+                    continue
+                out.setdefault(f"{qname}::{f.name}", f)
+        return out
 
     @staticmethod
     def _auto_exports(module: ScenarioModule) -> List[str]:

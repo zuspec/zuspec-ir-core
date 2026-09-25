@@ -73,7 +73,7 @@ from .data_type import (
 )
 from .expr import (
     Expr, BinOp, UnaryOp, BoolOp, CmpOp, AugOp,
-    ExprBin, ExprRef, ExprConstant, TypeExprRefSelf, ExprRefField,
+    ExprBin, ExprRef, ExprConstant, TypeExprRefSelf, TypeExprRefSuper, ExprRefField,
     ExprRefParam, ExprRefLocal, ExprRefUnresolved, ExprRefPy,
     ExprRefBottomUp, ExprUnary, ExprBool, ExprCompare,
     ExprAttribute, ExprSlice, ExprSubscript, ExprCall, Keyword, ExprAwait,
@@ -101,7 +101,7 @@ from .stmt import (
     WithItem, StmtWith, StmtExceptHandler, StmtTry, TypeIgnore, Module,
     StmtMatch, StmtMatchCase, Pattern, PatternValue, PatternAs, PatternOr, PatternSequence,
     # PSS-specific statements
-    StmtRepeat, StmtRepeatWhile, StmtForeach, StmtYield, StmtRandomize,
+    StmtRepeat, StmtRepeatWhile, StmtForeach, StmtYield, StmtSuper, StmtRandomize,
     # Interface-protocol statements
     SpawnStmt, SelectStmt, CompletionSetStmt, QueuePutStmt,
 )
@@ -137,7 +137,7 @@ from .pipeline_async import (
 
 # Scenario Runtime IR — Layer-1 `scenario` dialect (PSS lowering waist)
 from .scenario import (
-    ScStmt, ScCoroutine, ScExecBlock,
+    ScStmt, ScCoroutine, ScField, ScExecBlock,
     ScSeq, ScPar, ScSelectBranch, ScSelect, ScLoop, ScAtomic,
     ScIf, ScMatchCase, ScMatch,
     ScInvoke, ScSpawn, ScJoin, ScWait, ScImport, ScImportDecl,
@@ -185,7 +185,7 @@ __all__ = [
     # Interface-protocol types
     "IfProtocolProperties","IfProtocolType","CompletionType","QueueType",
     "Expr","BinOp","UnaryOp","BoolOp","CmpOp","AugOp","ExprBin","ExprRef","ExprConstant",
-    "TypeExprRefSelf","ExprRefField","ExprRefParam","ExprRefLocal","ExprRefUnresolved",
+    "TypeExprRefSelf","TypeExprRefSuper","ExprRefField","ExprRefParam","ExprRefLocal","ExprRefUnresolved",
     "ExprRefPy","ExprRefBottomUp","ExprUnary",
     "ExprBool","ExprCompare","ExprAttribute","ExprSlice","ExprSubscript","ExprCall","Keyword","ExprAwait",
     # PSS-specific expressions
@@ -200,7 +200,7 @@ __all__ = [
     "Stmt","StmtExpr","StmtAssign","StmtAnnAssign","StmtAugAssign","StmtReturn","StmtIf","StmtFor","StmtWhile",
     "StmtBreak","StmtContinue","StmtPass","StmtRaise","StmtAssert","StmtAssume","StmtCover","StmtUnique","Alias","Arg","Arguments",
     # PSS-specific statements
-    "StmtRepeat","StmtRepeatWhile","StmtForeach","StmtYield","StmtRandomize",
+    "StmtRepeat","StmtRepeatWhile","StmtForeach","StmtYield","StmtSuper","StmtRandomize",
     # Interface-protocol statements
     "SpawnStmt","SelectStmt","CompletionSetStmt","QueuePutStmt",
 "ExprList","ExprTuple","ExprDict","ExprSet","Comprehension","ExprListComp","ExprDictComp",
@@ -228,7 +228,7 @@ __all__ = [
     "ConstraintForeach","ConstraintUnique","ConstraintSoft","DistWeight",
     "ConstraintDist","ConstraintSolveBefore","ConstraintBlock",
     # Scenario Runtime IR (Layer-1 `scenario` dialect)
-    "ScStmt","ScCoroutine","ScExecBlock",
+    "ScStmt","ScCoroutine","ScField","ScExecBlock",
     "ScSeq","ScPar","ScSelectBranch","ScSelect","ScLoop","ScAtomic",
     "ScIf","ScMatchCase","ScMatch",
     "ScInvoke","ScSpawn","ScJoin","ScWait","ScImport","ScImportDecl",

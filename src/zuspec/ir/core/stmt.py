@@ -246,6 +246,19 @@ class StmtYield(Stmt):
 
 
 @dc.dataclass(kw_only=True)
+class StmtSuper(Stmt):
+    """PSS `super;` in a procedural exec block (LRM 17.1, 20.1.4)
+
+    Runs the base type's exec block of the same kind at this point. Which block
+    that is follows from where the statement sits, so the node has no operands;
+    a consumer that does not know the enclosing type's base must refuse it.
+
+    Example:
+        action A1 : A { exec body { super; message(NONE, "A1"); } }
+    """
+
+
+@dc.dataclass(kw_only=True)
 class StmtRandomize(Stmt):
     """PSS randomize statement with inline constraints
     

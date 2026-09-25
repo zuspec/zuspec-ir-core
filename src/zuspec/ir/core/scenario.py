@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from .expr import Expr
     from .stmt import Stmt
     from .constraint import Constraint
-    from .data_type import Function
+    from .data_type import DataType, Function
     from .activity import JoinSpec
     from .visitor import Visitor
 
@@ -88,6 +88,11 @@ class ScCoroutine(Base):
             not yet lowered to a :class:`ScSolveProblem`.  Carried explicitly so
             no constraint information is silently dropped before Phase 3 wires
             up ``ConstraintCollect``; Phase 3 consumes these and clears the list.
+        fields:
+            The originating action's attribute layout (:class:`ScField`), in
+            object-slot order.  Exec code names an attribute as
+            ``self.<name>``; this is what resolves that name to a slot and a
+            type.  Empty for synthetic coroutines.
     """
     name: str = dc.field()
     body: List[ScStmt] = dc.field(default_factory=list)
@@ -95,9 +100,24 @@ class ScCoroutine(Base):
     frame_locals: List[str] = dc.field(default_factory=list)
     action_type: Optional[str] = dc.field(default=None)
     pending_constraints: List['Function'] = dc.field(default_factory=list)
+    fields: List['ScField'] = dc.field(default_factory=list)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScCoroutine(self)
+
+
+@dc.dataclass(kw_only=True)
+class ScField(Base):
+    """One attribute of an action object: its storage slot and Layer-0 type.
+
+    ``slot`` is the attribute's index in the action's full field list -- the
+    same slot a :class:`ScSolveVar` writes back to and ``ExprRefField(index=)``
+    addresses.
+    """
+    name: str = dc.field()
+    slot: int = dc.field()
+    datatype: Optional['DataType'] = dc.field(default=None)
+    rand: bool = dc.field(default=False)
 
 
 # ---------------------------------------------------------------------------
@@ -528,6 +548,10 @@ class ScenarioModule(Base):
             Runnable entry points (:class:`ScHarness`), expanded per backend.
     """
     coroutines: Dict[str, ScCoroutine] = dc.field(default_factory=dict)
+    #: Native PSS functions exec code may call, by the name a call site uses:
+    #: package/global functions by bare and qualified name, component functions
+    #: as ``<component>::<name>``. Layer-0 ``Function``s, bodies unlowered.
+    functions: Dict[str, 'Function'] = dc.field(default_factory=dict)
     root: Optional[ScComponentInst] = dc.field(default=None)
     export_actions: List[str] = dc.field(default_factory=list)
     deferred_actions: List[str] = dc.field(default_factory=list)

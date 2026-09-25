@@ -70,6 +70,17 @@ class TypeExprRefSelf(ExprRef):
     """Reference to 'self'"""
     ...
 
+@dc.dataclass
+class TypeExprRefSuper(ExprRef):
+    """Reference to 'super': `self` seen as its base type.
+
+    `super.f(...)` names the base type's `f`, not an override of it. As a
+    receiver it is `TypeExprRefSelf` with that one difference, and it is a
+    separate node so a consumer cannot read `super.f()` as `self.f()` -- for
+    an override calling its base, that is a call to itself.
+    """
+    ...
+
 @dc.dataclass(kw_only=True)
 class ExprRefField(ExprRef):
     """Reference to a field relative to the base expression"""
