@@ -146,6 +146,9 @@ class Visitor:
     def visitActivityBind(self, o):
         pass
 
+    def visitActivitySchedulingConstraint(self, o):
+        pass
+
     # ------------------------------------------------------------------
     # Interface-Protocol IR visitor stubs
     # ------------------------------------------------------------------

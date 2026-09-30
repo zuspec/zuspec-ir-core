@@ -113,7 +113,14 @@ class Pool(Base):
 
 @dc.dataclass(kw_only=True)
 class PoolBind(Base):
-    """PSS bind directive: pool_name -> field_paths or wildcard."""
+    """PSS bind directive (LRM 12.3): pool -> field_paths or wildcard.
+
+    ``pool_name`` is the pool's own name. ``pool_path`` is the path the bind
+    wrote to reach it, from the binding component: ``["gfx0", "dpool"]`` for
+    ``bind gfx0.dpool ...`` (LRM Ex. 132), ``["dpool"]`` for a local pool.
+    Each ``field_paths`` entry is ``[instance.]*action.field`` as written.
+    """
     pool_name : str = dc.field()
     field_paths : list = dc.field(default_factory=list)  # empty = wildcard (*)
     is_wildcard : bool = dc.field(default=False)
+    pool_path : List[str] = dc.field(default_factory=list)

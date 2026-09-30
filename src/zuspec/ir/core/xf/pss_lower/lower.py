@@ -9,7 +9,9 @@ from ...activity import (
     ActivitySequenceBlock, ActivityAnonTraversal, ActivityTraversal,
     ActivityRepeat, ActivityForeach, ActivityIfElse, ActivityMatch, MatchCase,
     ActivityAtomic, ActivityParallel, ActivitySchedule, ActivitySelect,
+    ActivityDoWhile, ActivityReplicate, ActivitySchedulingConstraint,
 )
+from ...fields import FieldKind
 from ...scenario import (
     ScCoroutine, ScExecBlock, ScComponentInst, ScenarioModule, ScField,
     ScSeq, ScInvoke, ScLoop, ScIf, ScMatch, ScMatchCase, ScAtomic,
@@ -82,14 +84,31 @@ def _walk_invokes(stmts):
                 yield from _walk_invokes(sub)
 
 
+def _walk_activity(stmts):
+    """Every activity statement under *stmts*, depth first."""
+    for s in stmts or []:
+        yield s
+        for attr in ("stmts", "body", "if_body", "else_body"):
+            sub = getattr(s, attr, None)
+            if isinstance(sub, list):
+                yield from _walk_activity(sub)
+        for br in getattr(s, "branches", None) or []:
+            yield from _walk_activity(getattr(br, "body", None))
+        for case in getattr(s, "cases", None) or []:
+            yield from _walk_activity(getattr(case, "body", None))
+
+
 def _is_action(dt: Any) -> bool:
     """An action is a polymorphic class that is neither a component nor a
-    plain struct, and carries either an exec body or an activity."""
-    if not isinstance(dt, DataTypeClass) or isinstance(dt, DataTypeComponent):
-        return False
-    if dt.activity_ir is not None:
-        return True
-    return any(getattr(f, "name", None) == "body" for f in dt.functions)
+    plain struct.
+
+    A bodiless action is an action too: it lowers to a coroutine that does
+    nothing but solve. Leaving it out left ``do Z`` naming no coroutine,
+    which bc then ran as coroutine 0 -- a different action.
+    """
+    return (isinstance(dt, DataTypeClass) and not isinstance(dt, DataTypeComponent)
+            and getattr(dt, "flow_kind", None) is None
+            and not getattr(dt, "is_abstract", False))
 
 
 class PSSToScenarioPass:
@@ -142,7 +161,12 @@ class PSSToScenarioPass:
 
         # --- TraversalResolve (partial): gather actions, grouped by owner ---
         actions = self._collect_actions(type_map)
-        root = self.root or self._resolve_root(type_map, actions)
+        # `export T(...);` in the model (LRM 20.10), qualified by the front
+        # end. It decides the root and the exports when the caller does not.
+        declared = list(getattr(ctx, "export_actions", None) or [])
+        root = (self.root
+                or (declared[0].rsplit("::", 1)[0] if declared else None)
+                or self._resolve_root(type_map, actions))
         if root is None:
             raise ValueError("no root component with actions found; "
                              "pass root=... explicitly")
@@ -154,12 +178,26 @@ class PSSToScenarioPass:
         if not owned:
             raise ValueError("root component %r owns no actions" % root)
 
+        # TraversalResolve: a traversal names its target by qualified action
+        # type; coroutines are keyed by simple name (design O5: qualified
+        # keys come with non-root components, P1).
+        self._type_map = type_map
+        self._coro_of: Dict[str, str] = {}
+        for qname, dt in owned:
+            simple = qname.rsplit("::", 1)[-1]
+            if simple in self._coro_of.values():
+                raise UnsupportedConstructError(
+                    "two lowered actions are both named %r; coroutines are "
+                    "keyed by simple name until P1" % simple, loc=dt.getLoc())
+            self._coro_of[qname] = simple
+
         # --- callable functions: package scope, then every component's ---
         module.functions = self._collect_functions(ctx, type_map)
 
         # --- LifecycleNormalize ---
         for qname, dt in owned:
             self.validator.check_action(qname, dt)
+            self._cur_action = dt
             if dt.activity_ir is not None:
                 coro = self._lower_compound(qname, dt)   # ScheduleNormalize
             else:
@@ -179,9 +217,29 @@ class PSSToScenarioPass:
             coro.fields = _field_layout(dt)
             module.add_coroutine(coro)
 
+        # Every traversal must name a coroutine of this module. A backend
+        # given an unknown name has nothing correct to run (bc used to run
+        # coroutine 0), so this is checked here, where the location is.
+        for coro in module.coroutines.values():
+            for inv in _walk_invokes(coro.body):
+                if inv.target not in module.coroutines:
+                    raise UnsupportedConstructError(
+                        "traversal target %r does not name a lowered action"
+                        % inv.target, loc=inv.getLoc())
+
         # --- export selection ---
         if self.exports is not None:
             module.export_actions = list(self.exports)
+        elif declared:
+            exports = []
+            for qname in declared:
+                if qname not in self._coro_of:
+                    raise UnsupportedConstructError(
+                        "exported action %r is not an action of the root "
+                        "component %r; only the root's actions are lowered "
+                        "until P1" % (qname, root))
+                exports.append(self._coro_of[qname])
+            module.export_actions = exports
         else:
             module.export_actions = self._auto_exports(module)
 
@@ -254,6 +312,17 @@ class PSSToScenarioPass:
         ``pending_constraints`` for Phase 3.
         """
         simple = qname.rsplit("::", 1)[-1]
+        pre_block, post_block, body_ops, pending = self._exec_blocks(dt)
+        return ScCoroutine(
+            name=simple,
+            body=self._lifecycle(pre_block, post_block, body_ops),
+            action_type=qname,
+            pending_constraints=pending,
+        ).copy_loc(dt)
+
+    def _exec_blocks(self, dt: DataTypeClass):
+        """An action's exec blocks and in-force constraints:
+        ``(pre_solve, post_solve, body ops, pending constraints)``."""
         body_ops: List = []
         pre_block: Optional[ScExecBlock] = None
         post_block: Optional[ScExecBlock] = None
@@ -272,23 +341,20 @@ class PSSToScenarioPass:
                 # A named constraint block (e.g. addr_aligned).  Carried until
                 # Phase 3 folds it into a ScSolveProblem.
                 pending.append(f)
+        return pre_block, post_block, body_ops, pending
 
-        # Lifecycle order (pre_solve → [solve] → post_solve → body); the
-        # ScSolveProblem is inserted between pre_solve and post_solve by
-        # ConstraintCollect in lower().
+    @staticmethod
+    def _lifecycle(pre_block, post_block, main: List) -> List:
+        """Lifecycle order: pre_solve → [solve] → post_solve → *main* (the
+        exec body, or the activity). The ScSolveProblem is inserted between
+        pre_solve and post_solve by ConstraintCollect in lower()."""
         seq: List = []
         if pre_block is not None:
             seq.append(pre_block)
         if post_block is not None:
             seq.append(post_block)
-        seq.extend(body_ops)
-
-        return ScCoroutine(
-            name=simple,
-            body=seq,
-            action_type=qname,
-            pending_constraints=pending,
-        ).copy_loc(dt)
+        seq.extend(main)
+        return seq
 
     # ------------------------------------------------------------------
     # Exec-body lowering with import splitting
@@ -336,13 +402,104 @@ class PSSToScenarioPass:
     # ------------------------------------------------------------------
     def _lower_compound(self, qname: str, dt: DataTypeClass) -> ScCoroutine:
         simple = qname.rsplit("::", 1)[-1]
-        # pending constraints (named constraint blocks on a compound action)
-        pending = [f for f in dt.functions if _is_pending_constraint(f)]
-        body = self._lower_activity(dt.activity_ir)
+        # A compound action has the same lifecycle as an atomic one, with its
+        # activity in place of the exec body (LRM 13.4.12): its own pre_solve
+        # runs before its children's, which solve when they are traversed.
+        pre_block, post_block, _, pending = self._exec_blocks(dt)
+        body = self._lifecycle(pre_block, post_block,
+                               self._lower_activity(dt.activity_ir))
         return ScCoroutine(
             name=simple, body=body, action_type=qname,
             pending_constraints=pending,
         ).copy_loc(dt)
+
+    def _traversal_target(self, s, type_qname: Optional[str],
+                          written: Optional[str], what: Optional[str] = None) -> str:
+        """The coroutine a traversal of *s* runs.
+
+        *type_qname* is the action type as the front end's linker resolved
+        it, and decides. Without one (IR built by hand or from Python),
+        *written* must name an owned action exactly: its qualified name, or
+        its coroutine's simple name. Anything else is refused -- never
+        guessed.
+        """
+        what = what or "action %r" % written
+        if type_qname is not None:
+            coro = self._coro_of.get(type_qname)
+            if coro is not None:
+                return coro
+            if _is_action(self._type_map.get(type_qname)):
+                raise UnsupportedConstructError(
+                    "traversal of %s runs %s, an action of component %r; only "
+                    "the root component's actions are lowered until P1"
+                    % (what, type_qname, type_qname.rsplit("::", 1)[0]),
+                    loc=s.getLoc())
+            raise UnsupportedConstructError(
+                "traversal of %s: %r is not an action" % (what, type_qname),
+                loc=s.getLoc())
+        if written is not None:
+            if written in self._coro_of:
+                return self._coro_of[written]
+            if written in self._coro_of.values():
+                return written
+        raise UnsupportedConstructError(
+            "traversal of %s does not name an action of the root component"
+            % what, loc=s.getLoc())
+
+    @staticmethod
+    def _check_no_replicate_branches(s, kind: str) -> None:
+        """`replicate` directly in a parallel/schedule expands into that many
+        BRANCHES (LRM 11.5.1); a loop would be one branch."""
+        for st in s.stmts:
+            if isinstance(st, ActivityReplicate):
+                raise UnsupportedConstructError(
+                    "replicate directly inside %s expands into branches; "
+                    "that is P1" % kind, loc=st.getLoc())
+
+    def _check_schedule_members(self, s) -> None:
+        """Refuse a ``schedule`` whose members interact (design D4): a
+        scheduling constraint, or a member that -- directly or through the
+        activity of a compound action -- has a flow-object reference or a
+        resource claim."""
+        for st in _walk_activity(s.stmts):
+            if isinstance(st, ActivitySchedulingConstraint):
+                raise UnsupportedConstructError(
+                    "schedule with a scheduling constraint needs the planner "
+                    "(P3/P4, design D4)", loc=st.getLoc())
+        seen = set()
+        for st in _walk_activity(s.stmts):
+            qname = getattr(st, "type_qname", None)
+            if isinstance(st, (ActivityTraversal, ActivityAnonTraversal)) \
+                    and qname is not None:
+                why = self._interaction(qname, seen)
+                if why is not None:
+                    raise UnsupportedConstructError(
+                        "schedule with interacting members (%s) needs the "
+                        "planner (P3/P4, design D4)" % why, loc=st.getLoc())
+
+    def _interaction(self, qname: str, seen: set) -> Optional[str]:
+        """Why action *qname* interacts with others, or None."""
+        if qname in seen:
+            return None
+        seen.add(qname)
+        dt = self._type_map.get(qname)
+        chain = dt
+        while chain is not None:
+            for f in getattr(chain, "fields", []) or []:
+                if f.kind in (FieldKind.Input, FieldKind.Output):
+                    return "%s has flow-object reference %r" % (qname, f.name)
+                if f.kind in (FieldKind.Lock, FieldKind.Share):
+                    return "%s claims resource %r" % (qname, f.name)
+            sup = getattr(chain, "super", None)
+            chain = self._type_map.get(getattr(sup, "ref_name", None))
+        act = getattr(dt, "activity_ir", None)
+        for st in _walk_activity(act.stmts if act is not None else []):
+            sub = getattr(st, "type_qname", None)
+            if sub is not None:
+                why = self._interaction(sub, seen)
+                if why is not None:
+                    return why
+        return None
 
     def _lower_activity(self, act) -> List:
         """Lower the top-level activity into a coroutine body (a list of ops)."""
@@ -365,15 +522,42 @@ class PSSToScenarioPass:
                     "inline traversal constraints (`do %s with {...}`) are a "
                     "later phase" % s.action_type, loc=s.getLoc(),
                     remedy="use a named constraint on the action for now")
-            return ScInvoke(target=s.action_type, inst=s.label).copy_loc(s)
+            target = self._traversal_target(s, s.type_qname, s.action_type)
+            return ScInvoke(target=target, inst=s.label).copy_loc(s)
 
         if isinstance(s, ActivityTraversal):
-            # Resolve a handle field to its action type.
             if s.inline_constraints:
                 raise UnsupportedConstructError(
                     "inline traversal constraints on %r are a later phase"
                     % s.handle, loc=s.getLoc())
-            return ScInvoke(target=s.handle, inst=s.handle).copy_loc(s)
+            written = None
+            if s.type_qname is None:
+                # Hand-built IR: the handle's declared type, as written.
+                for f in getattr(self._cur_action, "fields", []) or []:
+                    if f.name == s.handle:
+                        written = getattr(getattr(f, "datatype", None),
+                                          "ref_name", None)
+                        break
+            target = self._traversal_target(s, s.type_qname, written,
+                                            what="handle %r" % s.handle)
+            return ScInvoke(target=target, inst=s.handle).copy_loc(s)
+
+        if isinstance(s, ActivityDoWhile):
+            # `repeat {...} while (c);`: the body runs before the first test.
+            return ScLoop(kind="dowhile", cond=s.condition,
+                          body=self._lower_stmts(s.body)).copy_loc(s)
+
+        if isinstance(s, ActivityReplicate):
+            # In a sequential scope, `replicate (N) S` is N copies of S in
+            # sequence: a counted loop, while nothing names the per-iteration
+            # instances. (In parallel/schedule it is refused below.)
+            if s.label is not None:
+                raise UnsupportedConstructError(
+                    "replicate with an iteration label (%s[]) names each "
+                    "iteration's instances; that is P1" % s.label,
+                    loc=s.getLoc())
+            return ScLoop(kind="repeat", count=s.count, index_var=s.index_var,
+                          body=self._lower_stmts(s.body)).copy_loc(s)
 
         if isinstance(s, ActivityRepeat):
             return ScLoop(kind="repeat", count=s.count, index_var=s.index_var,
@@ -399,15 +583,18 @@ class PSSToScenarioPass:
             return ScAtomic(body=self._lower_stmts(s.stmts)).copy_loc(s)
 
         if isinstance(s, ActivityParallel):
+            self._check_no_replicate_branches(s, "parallel")
             return ScPar(branches=self._lower_stmts(s.stmts),
                          join_spec=s.join_spec).copy_loc(s)
 
         if isinstance(s, ActivitySchedule):
-            # Iteration-1 approximation: `schedule` ≈ `parallel` (ALL join).
-            _log.info("approximating `schedule` as `parallel`+ALL "
-                      "(iteration-1 limitation)")
+            # With members that do not interact, running them all in
+            # parallel is one legal schedule (LRM 11.3.5). Members that
+            # interact need the planner (P3/P4), so they are refused (D4).
+            self._check_no_replicate_branches(s, "schedule")
+            self._check_schedule_members(s)
             return ScPar(branches=self._lower_stmts(s.stmts),
-                         join_spec=None).copy_loc(s)
+                         join_spec=s.join_spec).copy_loc(s)
 
         if isinstance(s, ActivitySelect):
             branches = [ScSelectBranch(guard=b.guard, weight=b.weight,

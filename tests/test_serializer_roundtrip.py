@@ -128,3 +128,19 @@ class TestIRDeserializer:
         _, layer = deser.deserialize(yaml_text)
         layer_name = layer.name if hasattr(layer, "name") else str(layer)
         assert layer_name == "SCHEDULED"
+
+
+class TestPoolBindRoundTrip:
+    def test_pool_path_roundtrips(self):
+        """`bind gfx0.dpool {...}` keeps the path to the pool (LRM 12.3)."""
+        from zuspec.ir.core.fields import PoolBind
+        original = PoolBind(pool_name="dpool", pool_path=["gfx0", "dpool"],
+                            field_paths=["gfx0.producer.out"])
+        text = IRSerializer().serialize(original, _make_layer())
+        assert yaml.safe_load(text)["pool_path"] == ["gfx0", "dpool"]
+        deser = IRDeserializer()
+        deser.register("PoolBind", PoolBind)
+        result, _ = deser.deserialize(text)
+        assert isinstance(result, PoolBind)
+        assert result.pool_path == ["gfx0", "dpool"]
+        assert result.field_paths == ["gfx0.producer.out"]

@@ -55,13 +55,18 @@ class JoinSpec(Base):
     """Specifies the join policy for a parallel or schedule block.
 
     Attributes:
-        kind:         Join policy (default ``JoinKind.ALL``).
-        branch_label: Target label for ``kind=JoinKind.BRANCH``.
-        count:        Branch count for ``kind=JoinKind.SELECT`` or ``JoinKind.FIRST``.
+        kind:          Join policy (default ``JoinKind.ALL``).
+        branch_label:  Target label for ``kind=JoinKind.BRANCH``, from the
+                       Python front end, which names one.
+        branch_labels: The labels a PSS ``join_branch(L1, L2, ...)`` names,
+                       in order (LRM 11.3.4): the join waits for those
+                       branches.
+        count:         Branch count for ``kind=JoinKind.SELECT`` or ``JoinKind.FIRST``.
     """
     kind: JoinKind = dc.field(default=JoinKind.ALL)
     branch_label: Optional[str] = dc.field(default=None)
     count: Optional['Expr'] = dc.field(default=None)
+    branch_labels: List[str] = dc.field(default_factory=list)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitJoinSpec(self)
@@ -82,8 +87,13 @@ class ActivityStmt(Base):
                  tool-specific directives (e.g. ``(* parallel_case *)`` in SV).
                  Labels (``# zdc: label=my_fsm``) can be used to identify
                  specific IR nodes from outside the parse.
+        label:   The statement's PSS label (``L1: sequence {...}``,
+                 ``L2: do B;``), or None. A labeled statement is a named
+                 sub-activity (LRM 11.8): join-branch lists, scheduling
+                 constraints and hierarchical references name it.
     """
     pragmas: Dict[str, Any] = dc.field(default_factory=dict)
+    label: Optional[str] = dc.field(default=None)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitActivityStmt(self)
@@ -148,10 +158,16 @@ class ActivityTraversal(ActivityStmt):
         handle:             Field name on ``self`` (e.g. ``"a1"``).
         index:              Optional subscript expression for array handles.
         inline_constraints: Constraint expressions from the ``with`` body.
+        type_qname:         The handle's action type as the front end's
+                            linker resolved it, qualified (``"pss_top::B"``).
+                            None when the producer resolved nothing (IR
+                            built by hand or from Python); a consumer then
+                            resolves ``handle`` itself.
     """
     handle: str = dc.field()
     index: Optional['Expr'] = dc.field(default=None)
     inline_constraints: List['Expr'] = dc.field(default_factory=list)
+    type_qname: Optional[str] = dc.field(default=None)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitActivityTraversal(self)
@@ -169,8 +185,13 @@ class ActivityAnonTraversal(ActivityStmt):
                             ``with T() as x:``).
         inline_constraints: Constraint expressions from the ``with`` body.
         init_bindings:      Flow bindings from keyword args (``await T(field=label.attr)``).
+        type_qname:         ``action_type`` as the front end's linker
+                            resolved it, qualified (``do B`` in ``pss_top``
+                            -> ``"pss_top::B"``); ``action_type`` stays as
+                            written. None when the producer resolved nothing.
     """
     action_type: str = dc.field()
+    type_qname: Optional[str] = dc.field(default=None)
     label: Optional[str] = dc.field(default=None)
     inline_constraints: List['Expr'] = dc.field(default_factory=list)
     action_type_cls: Optional[type] = dc.field(default=None)
@@ -379,6 +400,24 @@ class ActivityConstraint(ActivityStmt):
 
 
 @dc.dataclass(kw_only=True)
+class ActivitySchedulingConstraint(ActivityStmt):
+    """``constraint parallel {a, b};`` / ``constraint sequence {a, b};``
+    (LRM 13.2): the named sub-activities run in parallel, or in the
+    order given, within an enclosing ``schedule``.
+
+    Attributes:
+        is_parallel: True for ``parallel``, False for ``sequence``.
+        targets:     References to the constrained statements (labels or
+                     handles), as ``ExprAttribute`` chains from ``self``.
+    """
+    is_parallel: bool = dc.field()
+    targets: List['Expr'] = dc.field(default_factory=list)
+
+    def accept(self, v: 'Visitor') -> None:
+        v.visitActivitySchedulingConstraint(self)
+
+
+@dc.dataclass(kw_only=True)
 class ActivityBind(ActivityStmt):
     """Explicit flow-object binding — ``bind(src, dst)``.
 
@@ -413,6 +452,7 @@ __all__ = [
     "ActivityMatch",
     "ActivityConstraint",
     "ActivityBind",
+    "ActivitySchedulingConstraint",
     "ActivityFill",
     "ActivityChain",
     "ActivityConstraintForall",

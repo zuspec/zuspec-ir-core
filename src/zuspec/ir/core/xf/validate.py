@@ -67,11 +67,9 @@ class ScenarioValidator:
                 loc=dt.getLoc(),
                 remedy="flow objects/pools/resources are a follow-on")
 
-        has_body = any(getattr(f, "name", None) == "body" for f in dt.functions)
-        if dt.activity_ir is None and not has_body:
-            raise UnsupportedConstructError(
-                "action %r has neither an exec body nor an activity" % qname,
-                loc=dt.getLoc())
+        # An action with neither an exec body nor an activity is legal PSS:
+        # it lowers to a coroutine that only solves (and runs its pre/post
+        # solve), so a traversal of it runs *it*, not some other action.
 
     # ------------------------------------------------------------------
     # Layer-1 pre-flight: enumerate *every* unsupported construct at once.

@@ -128,6 +128,7 @@ from .activity import (
     ActivityMatch,
     ActivityConstraint,
     ActivityBind,
+    ActivitySchedulingConstraint,
 )
 from .pipeline_async import (
     HazardOpKind, AccessDir,
@@ -215,7 +216,7 @@ __all__ = [
     "ActivityRepeat","ActivityDoWhile","ActivityWhileDo","ActivityForeach","ActivityReplicate",
     "SelectBranch","ActivitySelect",
     "ActivityIfElse","MatchCase","ActivityMatch",
-    "ActivityConstraint","ActivityBind",
+    "ActivityConstraint","ActivityBind","ActivitySchedulingConstraint",
     # M0 foundations
     "Provenance","DomainNode","Connection","Signal","Bundle","MethodInterface",
     "PortConnection","ModuleInstance",
