@@ -5,7 +5,7 @@ import dataclasses as dc
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-from ...data_type import DataTypeClass, DataTypeComponent
+from ...data_type import DataTypeClass, DataTypeComponent, DataTypeString
 from ...activity import (
     ActivitySequenceBlock, ActivityAnonTraversal, ActivityTraversal,
     ActivityRepeat, ActivityForeach, ActivityIfElse, ActivityMatch, MatchCase,
@@ -206,14 +206,18 @@ class PSSToScenarioPass:
         self._imports = {}
         for fn_id, f in enumerate(getattr(ctx, "import_functions", []) or []):
             blocking = bool(getattr(f, "is_target", False)) and f.returns is None
-            arg_types = []
+            arg_types, string_at = [], []
             args = getattr(f, "args", None)
-            for a in (getattr(args, "args", []) if args is not None else []):
+            for i, a in enumerate(getattr(args, "args", []) if args is not None else []):
                 ann = getattr(a, "annotation", None)
+                if isinstance(ann, DataTypeString):
+                    string_at.append(i)
                 arg_types.append((getattr(ann, "bits", 32) or 32,
                                   bool(getattr(ann, "signed", False))))
             ret_type = None
             if f.returns is not None:
+                if isinstance(f.returns, DataTypeString):
+                    string_at.append("return")
                 ret_type = (getattr(f.returns, "bits", 32) or 32,
                             bool(getattr(f.returns, "signed", False)))
             self._imports[f.name] = {
@@ -221,7 +225,7 @@ class PSSToScenarioPass:
                 "arg_types": arg_types, "ret_type": ret_type}
             module.imports.append(ScImportDecl(
                 name=f.name, fn_id=fn_id, blocking=blocking,
-                arg_types=arg_types, ret_type=ret_type))
+                arg_types=arg_types, ret_type=ret_type, string_at=string_at))
 
         # --- TraversalResolve (partial): gather actions, grouped by owner ---
         actions = self._collect_actions(type_map)

@@ -381,12 +381,17 @@ class ScImportDecl(Base):
         blocking: True for ``target`` (SV task), False for ``solve`` (function).
         arg_types: ``[(width, signed)]`` per argument (scalar v1).
         ret_type:  ``(width, signed)`` for the return value, or ``None`` (void).
+        string_at: the positions whose declared type is ``string``
+                   (``"return"``, or an argument index), which the
+                   ``(width, signed)`` tuples cannot describe. A consumer
+                   that marshals scalars refuses a call to such an import.
     """
     name: str = dc.field()
     fn_id: int = dc.field()
     blocking: bool = dc.field(default=True)
     arg_types: List = dc.field(default_factory=list)
     ret_type: Optional[tuple] = dc.field(default=None)
+    string_at: List = dc.field(default_factory=list)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScImportDecl(self)

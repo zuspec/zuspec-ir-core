@@ -17,6 +17,11 @@ action's instance (P1-D4).
 **Construction (9.1.4.1 d, 20.1.3).** Every instance's declared initial
 values, then each ``exec init_down`` top-down, then each ``exec init_up``
 bottom-up: the order LRM Example 281 lists.
+
+**A channel is state of its instance.** ``channel_c<T, D>`` (21.9.1) is
+``2 + D`` slots of the instance that declares it: ``c.$count``, ``c.$head``
+and ``c.$buf0`` .. ``c.$buf<D-1>``, a ring of scalar elements, all 0 at
+construction. A channel whose element is not a scalar stays one opaque slot.
 """
 from __future__ import annotations
 
@@ -24,15 +29,35 @@ import dataclasses as dc
 from typing import Any, Dict, List, Optional, Tuple
 
 from ... import expr as E
-from ...data_type import DataTypeArray, DataTypeComponent, DataTypeRef
+from ...data_type import (DataTypeArray, DataTypeChannel, DataTypeComponent,
+                          DataTypeInt, DataTypeRef)
 from ...scenario import ScCompInit, ScCompInstance, ScComponentTree, ScField
 from ...stmt import StmtAssign
 from ..validate import UnsupportedConstructError
-from .layout import Leaf, field_leaves, prefix_self, resolve
+from .layout import Leaf, field_leaves, is_struct, prefix_self, resolve
 
 
 def _loc(n):
     return getattr(n, "loc", None)
+
+
+#: the type of a channel's count and head slots
+CHANNEL_INDEX = DataTypeInt(bits=32, signed=False)
+
+
+def channel_leaves(f, types) -> Optional[List[Leaf]]:
+    """The slots of channel attribute *f* (see the module docstring), or
+    None if *f* is not a channel bc-style consumers can hold."""
+    dt = f.datatype
+    if not isinstance(dt, DataTypeChannel) or not dt.depth or dt.depth < 1:
+        return None
+    elem = dt.element_type
+    if elem is None or is_struct(elem, types) or isinstance(elem, DataTypeArray):
+        return None
+    out = [Leaf((f.name, "$count"), CHANNEL_INDEX, f, False),
+           Leaf((f.name, "$head"), CHANNEL_INDEX, f, False)]
+    out += [Leaf((f.name, "$buf%d" % i), elem, f, False) for i in range(dt.depth)]
+    return out
 
 
 @dc.dataclass
@@ -166,7 +191,8 @@ class CompLayouts:
             for f in getattr(dt, "fields", []) or []:
                 tq = self.field_type(f)
                 if tq is None:
-                    for leaf in field_leaves(f, self.types):
+                    for leaf in (channel_leaves(f, self.types)
+                                 or field_leaves(f, self.types)):
                         lay.slots.append((leaf.name, leaf))
                     continue
                 if isinstance(f.datatype, DataTypeArray):
