@@ -301,6 +301,18 @@ class Visitor:
         for child in o.children:
             child.accept(self)
 
+    def visitScCompInstance(self, o):
+        pass
+
+    def visitScCompInit(self, o):
+        pass
+
+    def visitScComponentTree(self, o):
+        for inst in o.instances:
+            inst.accept(self)
+        for blk in o.init:
+            blk.accept(self)
+
     def visitScRootAction(self, o):
         pass
 

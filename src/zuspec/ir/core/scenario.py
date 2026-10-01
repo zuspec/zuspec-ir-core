@@ -550,6 +550,15 @@ class ScActionNode(Base):
                     (13.4.8): the block declaring it, or for a handle
                     declared in an action body, its parent's ACTIVITY scope.
         children:   Child node ids.
+        comp:       The component instances it may run in (P1.5, LRM
+                    13.4.5): ids of instances of its action's component
+                    type, as offsets from its parent's instance (the root's,
+                    from the root component's), in pre-order. One
+                    candidate: it runs there. More: the solve chooses.
+        comp_slot:  With more than one candidate, the slot of the
+                    activation's object holding the instance chosen (an
+                    absolute :attr:`ScCompInstance.id`): a variable of the
+                    node's cone. It follows the action subtrees.
     """
     id: int = dc.field()
     path: str = dc.field(default="")
@@ -559,6 +568,8 @@ class ScActionNode(Base):
     parent: Optional[int] = dc.field(default=None)
     decl_scope: Optional[int] = dc.field(default=None)
     children: List[int] = dc.field(default_factory=list)
+    comp: List[int] = dc.field(default_factory=lambda: [0])
+    comp_slot: Optional[int] = dc.field(default=None)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScActionNode(self)
@@ -589,6 +600,8 @@ class ScopeConstraintKind(enum.Enum):
     TYPE     = "type"      # a constraint of a node's type: while its nodes exist
     ACTIVITY = "activity"  # an activity `constraint`: in its scope (13.1.9)
     WITH     = "with"      # an inline `with`: at its traversal only (13.1.4)
+    COMP     = "comp"      # a node's component is one of its candidates
+                           # (13.4.5, P1-D4): while the node exists
 
 
 @dc.dataclass(kw_only=True)
@@ -702,6 +715,73 @@ class ScActionInst(Base):
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScActionInst(self)
+
+
+@dc.dataclass(kw_only=True)
+class ScCompInstance(Base):
+    """One instance of the elaborated component tree (P1.5).
+
+    Attributes:
+        id:         Pre-order index; the root component is 0. The instances
+                    of a component type's subtree are numbered the same way
+                    wherever it is instantiated, so an instance is its
+                    parent's id plus a static offset.
+        path:       Its name from the root, dotted: ``""``, ``a.sub``,
+                    ``ch[2]``.
+        type_qname: Its component type.
+        base:       Its first slot in the component object.
+        size:       The slots of its subtree.
+        count:      The instances of its subtree, itself included.
+        parent:     Its parent instance; None for the root.
+    """
+    id: int = dc.field()
+    path: str = dc.field(default="")
+    type_qname: str = dc.field()
+    base: int = dc.field(default=0)
+    size: int = dc.field(default=0)
+    count: int = dc.field(default=1)
+    parent: Optional[int] = dc.field(default=None)
+
+    def accept(self, v: 'Visitor') -> None:
+        v.visitScCompInstance(self)
+
+
+@dc.dataclass(kw_only=True)
+class ScCompInit(Base):
+    """One block of component-tree construction, run in one instance:
+    ``self`` is that instance. ``kind`` is ``"init"`` (the attributes'
+    declared initial values), ``"init_down"`` or ``"init_up"``."""
+    instance: int = dc.field()
+    kind: str = dc.field()
+    stmts: List['Stmt'] = dc.field(default_factory=list)
+
+    def accept(self, v: 'Visitor') -> None:
+        v.visitScCompInit(self)
+
+
+@dc.dataclass(kw_only=True)
+class ScComponentTree(Base):
+    """The elaborated component tree (P1.5, LRM 9.1.4): ONE flattened
+    component object, each instance a slot range (P1-D1).
+
+    Attributes:
+        root:       The root component type.
+        size:       Slots of the component object.
+        instances:  Every instance, in pre-order.
+        fields:     Every slot, named by its path from the root
+                    (``a.sub.k``, ``ch[2].id``).
+        init:       Construction, in order (9.1.4.1 d, 20.1.3): every
+                    instance's initial values, then ``init_down`` top-down,
+                    then ``init_up`` bottom-up (Example 281's order).
+    """
+    root: str = dc.field()
+    size: int = dc.field(default=0)
+    instances: List[ScCompInstance] = dc.field(default_factory=list)
+    fields: List[ScField] = dc.field(default_factory=list)
+    init: List[ScCompInit] = dc.field(default_factory=list)
+
+    def accept(self, v: 'Visitor') -> None:
+        v.visitScComponentTree(self)
 
 
 @dc.dataclass(kw_only=True)
@@ -820,6 +900,8 @@ class ScenarioModule(Base):
     types: Dict[str, 'DataType'] = dc.field(default_factory=dict)
     #: The action tree of each exported action, by coroutine name.
     trees: Dict[str, ScActionTree] = dc.field(default_factory=dict)
+    #: The elaborated component tree under the root component (P1.5).
+    comp_tree: Optional[ScComponentTree] = dc.field(default=None)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScenarioModule(self)
@@ -833,6 +915,9 @@ class ScenarioModule(Base):
 
 
 __all__ = [
+    "ScCompInstance",
+    "ScCompInit",
+    "ScComponentTree",
     "ScStmt",
     "ScCoroutine",
     "ScExecBlock",

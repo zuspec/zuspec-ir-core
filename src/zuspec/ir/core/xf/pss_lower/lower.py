@@ -27,6 +27,7 @@ from .constraints import (LIFECYCLE_FUNCS, collect_solve_problem,
                           is_pending_constraint)
 from .layout import object_layout, prefix_self, subst_names
 from .action_tree import Layouts, build_tree
+from .comp_tree import CompLayouts, build_comp_tree
 
 _log = logging.getLogger("zuspec.ir.xf.pss_lower")
 
@@ -134,6 +135,24 @@ def _walk_activity(stmts):
             yield from _walk_activity(getattr(case, "body", None))
 
 
+def coro_key(module: ScenarioModule, name: str) -> Optional[str]:
+    """The coroutine of *module* that *name* names: its key (``T``,
+    ``sub_c::S``), its action's qualified name (``pss_top::T``), or a simple
+    name only one lowered action has. None if it names none; an ambiguous
+    simple name is an error."""
+    if name in module.coroutines:
+        return name
+    by_type = [k for k, c in module.coroutines.items() if c.action_type == name]
+    if by_type:
+        return by_type[0]
+    simple = [k for k in module.coroutines if k.rsplit("::", 1)[-1] == name]
+    if len(simple) > 1:
+        raise UnsupportedConstructError(
+            "action name %r is ambiguous: %s; qualify it"
+            % (name, ", ".join(sorted(simple))))
+    return simple[0] if simple else None
+
+
 def _is_action(dt: Any) -> bool:
     """An action is a polymorphic class that is neither a component nor a
     plain struct.
@@ -154,8 +173,10 @@ class PSSToScenarioPass:
     Args:
         root:    Qualified name of the root component to lower.  When ``None``,
                  auto-detected as the (non-library) component that owns actions.
-        exports: Optional explicit list of action simple-names to export.  When
-                 ``None``, every lowered atomic action is exported.
+        exports: Optional explicit list of actions to export, each a name
+                 :func:`coro_key` accepts.  When ``None``, the model's
+                 ``export`` declarations, else every root action nothing
+                 traverses.
     """
 
     def __init__(self, root: Optional[str] = None,
@@ -211,24 +232,42 @@ class PSSToScenarioPass:
         module.root = ScComponentInst(
             name=root.rsplit("::", 1)[-1], type_name=root)
 
+        # The component tree (P1.5): every instance under the root, one
+        # object, constructed before the root action runs.
+        self._type_map = type_map
+        self._comps = CompLayouts(type_map)
+        if isinstance(type_map.get(root), DataTypeComponent):
+            module.comp_tree = build_comp_tree(self._comps, root)
+            placed = {i.type_qname for i in module.comp_tree.instances}
+        else:
+            placed = {root}
+
+        # The actions of the root and of every component type the tree
+        # instantiates (or one of its bases): each can run.
+        def runs(owner: str) -> bool:
+            if owner == root:
+                return True
+            if not isinstance(type_map.get(owner), DataTypeComponent):
+                return False
+            return any(self._comps.is_a(t, owner) for t in placed)
         owned = [(q, dt) for (q, dt) in actions
                  if q.rsplit("::", 1)[0] == root]
         if not owned:
             raise ValueError("root component %r owns no actions" % root)
+        owned += [(q, dt) for (q, dt) in actions
+                  if q.rsplit("::", 1)[0] != root and runs(q.rsplit("::", 1)[0])]
 
         # TraversalResolve: a traversal names its target by qualified action
-        # type; coroutines are keyed by simple name (design O5: qualified
-        # keys come with non-root components, P1).
-        self._type_map = type_map
+        # type. A coroutine is keyed by its action's name relative to the
+        # root component: the root's actions by simple name (``T``), any
+        # other component's qualified (``sub_c::S``) -- unique, and a model
+        # of the root's actions alone keeps its names (O5).
         self._layouts = Layouts(type_map)
         self._coro_of: Dict[str, str] = {}
         for qname, dt in owned:
-            simple = qname.rsplit("::", 1)[-1]
-            if simple in self._coro_of.values():
-                raise UnsupportedConstructError(
-                    "two lowered actions are both named %r; coroutines are "
-                    "keyed by simple name until P1" % simple, loc=dt.getLoc())
-            self._coro_of[qname] = simple
+            owner, _, simple = qname.rpartition("::")
+            self._coro_of[qname] = simple if owner == root else qname
+        self._root = root
 
         # --- callable functions: package scope, then every component's ---
         module.functions = self._collect_functions(ctx, type_map)
@@ -282,26 +321,29 @@ class PSSToScenarioPass:
 
         # --- export selection ---
         if self.exports is not None:
-            module.export_actions = list(self.exports)
+            module.export_actions = [coro_key(module, x) or x for x in self.exports]
         elif declared:
             exports = []
             for qname in declared:
                 if qname not in self._coro_of:
                     raise UnsupportedConstructError(
-                        "exported action %r is not an action of the root "
-                        "component %r; only the root's actions are lowered "
-                        "until P1" % (qname, root))
+                        "exported action %r is not an action of a component "
+                        "of the tree under %r" % (qname, root))
                 exports.append(self._coro_of[qname])
             module.export_actions = exports
         else:
-            module.export_actions = self._auto_exports(module)
+            module.export_actions = [n for n in self._auto_exports(module)
+                                     if "::" not in n]
 
         # The action tree of each export (P1.2): its nodes, and the cones of
         # constraints that tie them.
         for name in module.export_actions:
             coro = module.coroutines.get(name)
             if coro is not None and coro.action_type is not None:
-                module.trees[name] = build_tree(self._layouts, name, coro.action_type)
+                module.trees[name] = build_tree(
+                    self._layouts, name, coro.action_type,
+                    comps=self._comps if module.comp_tree is not None else None,
+                    root_comp=root)
 
         return module
 
@@ -371,10 +413,9 @@ class PSSToScenarioPass:
         body; named constraint functions are carried on
         ``pending_constraints`` for Phase 3.
         """
-        simple = qname.rsplit("::", 1)[-1]
         pre_block, post_block, body_ops, pending = self._exec_blocks(dt)
         return ScCoroutine(
-            name=simple,
+            name=self._coro_of[qname],
             body=self._lifecycle(pre_block, post_block, body_ops),
             action_type=qname,
             pending_constraints=pending,
@@ -461,7 +502,6 @@ class PSSToScenarioPass:
     # ScheduleNormalize — compound activities → structured scenario ops
     # ------------------------------------------------------------------
     def _lower_compound(self, qname: str, dt: DataTypeClass) -> ScCoroutine:
-        simple = qname.rsplit("::", 1)[-1]
         # A compound action has the same lifecycle as an atomic one, with its
         # activity in place of the exec body (LRM 13.4.12): its own pre_solve
         # runs before its children's, which solve when they are traversed.
@@ -469,7 +509,7 @@ class PSSToScenarioPass:
         body = self._lifecycle(pre_block, post_block,
                                self._lower_activity(dt.activity_ir))
         return ScCoroutine(
-            name=simple, body=body, action_type=qname,
+            name=self._coro_of[qname], body=body, action_type=qname,
             pending_constraints=pending,
         ).copy_loc(dt)
 
@@ -490,9 +530,9 @@ class PSSToScenarioPass:
                 return coro
             if _is_action(self._type_map.get(type_qname)):
                 raise UnsupportedConstructError(
-                    "traversal of %s runs %s, an action of component %r; only "
-                    "the root component's actions are lowered until P1"
-                    % (what, type_qname, type_qname.rsplit("::", 1)[0]),
+                    "traversal of %s runs %s, an action of component %r, which "
+                    "is not instantiated under %r (9.1.5.1)"
+                    % (what, type_qname, type_qname.rsplit("::", 1)[0], self._root),
                     loc=s.getLoc())
             raise UnsupportedConstructError(
                 "traversal of %s: %r is not an action" % (what, type_qname),
@@ -503,8 +543,8 @@ class PSSToScenarioPass:
             if written in self._coro_of.values():
                 return written
         raise UnsupportedConstructError(
-            "traversal of %s does not name an action of the root component"
-            % what, loc=s.getLoc())
+            "traversal of %s does not name a lowered action" % what,
+            loc=s.getLoc())
 
     @staticmethod
     def _check_no_replicate_branches(s, kind: str) -> None:
@@ -562,6 +602,16 @@ class PSSToScenarioPass:
                     return why
         return None
 
+    def _no_tree(self, what: str, loc=None):
+        """Refuse *what*, which needs the current action's tree: with the
+        reason it has none, when building it failed."""
+        err = self._layouts.errors.get(getattr(self, "_cur_qname", None))
+        if err is not None:
+            raise err
+        raise UnsupportedConstructError(
+            "%s cannot be lowered without the action tree, and this action "
+            "has none" % what, loc=loc)
+
     def _child_base(self, s) -> Optional[int]:
         lay = getattr(self, "_cur_layout", None)
         return lay.child_base(s, self._iters) if lay is not None else None
@@ -577,9 +627,8 @@ class PSSToScenarioPass:
         variable fixed."""
         self._layouts.get(self._cur_qname, loc=s.getLoc())  # O4 refusal
         if self._cur_layout is None:
-            raise UnsupportedConstructError(
-                "replicate with an iteration label (%s[]) needs the action "
-                "tree, and this action has none" % s.label, loc=s.getLoc())
+            self._no_tree(
+                "replicate with an iteration label (%s[])" % s.label, loc=s.getLoc())
         saved = self._iters
         iterations = []
         try:
@@ -668,14 +717,12 @@ class PSSToScenarioPass:
             raise UnsupportedConstructError(
                 "traversal of an element of the handle array %r with a "
                 "computed index is not supported yet" % s.handle, loc=s.getLoc())
-        if getattr(s, "comp_expr", None) is not None:
-            raise UnsupportedConstructError(
-                "a traversal constrained with `comp == ...` is not supported "
-                "yet (P1.5)", loc=s.getLoc())
+        if getattr(s, "comp_expr", None) is not None and self._site(s) is None:
+            # The action tree chooses the instance (P1-D4).
+            self._no_tree(
+                "a traversal constrained with `comp == ...`", loc=s.getLoc())
         if getattr(s, "initializers", None) and self._site(s) is None:
-            raise UnsupportedConstructError(
-                "traversal initializers ({.x = ...}) need the action tree, and "
-                "this action has none", loc=s.getLoc())
+            self._no_tree("traversal initializers ({.x = ...})", loc=s.getLoc())
         if getattr(s, "init_bindings", None):
             raise UnsupportedConstructError(
                 "flow bindings on a traversal (%s) are not lowered by this "
@@ -692,10 +739,8 @@ class PSSToScenarioPass:
 
         if isinstance(s, ActivityAnonTraversal):
             if s.inline_constraints and self._site(s) is None:
-                raise UnsupportedConstructError(
-                    "inline traversal constraints (`do %s with {...}`) need the "
-                    "action tree, and this action has none" % s.action_type,
-                    loc=s.getLoc())
+                self._no_tree("inline traversal constraints (`do %s with {...}`)"
+                              % s.action_type, loc=s.getLoc())
             target = self._traversal_target(s, s.type_qname, s.action_type)
             return ScInvoke(target=target, inst=s.label,
                             inline_constraints=list(s.inline_constraints or []),
@@ -705,9 +750,8 @@ class PSSToScenarioPass:
 
         if isinstance(s, ActivityTraversal):
             if s.inline_constraints and self._site(s) is None:
-                raise UnsupportedConstructError(
-                    "inline traversal constraints on %r need the action tree, "
-                    "and this action has none" % s.handle, loc=s.getLoc())
+                self._no_tree("inline traversal constraints on %r" % s.handle,
+                              loc=s.getLoc())
             written = None
             if s.type_qname is None:
                 # Hand-built IR: the handle's declared type, as written.

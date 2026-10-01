@@ -12,6 +12,6 @@ constraints (constraints are carried on the coroutine as ``pending_constraints``
 until Phase 3 wires up ``ConstraintCollect``).  Compound actions (those with an
 ``activity_ir``) are recorded in ``ScenarioModule.deferred_actions`` for Phase 4.
 """
-from .lower import PSSToScenarioPass
+from .lower import PSSToScenarioPass, coro_key
 
-__all__ = ["PSSToScenarioPass"]
+__all__ = ["PSSToScenarioPass", "coro_key"]

@@ -16,6 +16,15 @@ ONE node, reset on each iteration (13.4.8); only a labeled ``replicate``
 names each iteration's instances (``R[0].#0``), so only it multiplies nodes,
 and only with a constant count (O4).
 
+**Components (P1.5, P1-D4).** Each node runs in a component instance: one
+of its candidates, the instances of its action's component type in the
+subtree of its parent's instance (9.1.5.1; none is a located error, LRM
+Ex 51). With one candidate the instance is static, relative to the parent's.
+With more, the node's ``comp`` is a variable of its cone, in a slot after
+the action subtrees (``ScActionNode.comp_slot``), constrained to the
+candidates (``ScopeConstraintKind.COMP``) and by a traversal's
+``comp == X`` (a ``with``).
+
 **The cones (P1-D2, P1-D3).** Every constraint that can be in force on the
 activation -- each node type's own (and its struct attributes'), each
 activity ``constraint`` (13.1.9), each inline ``with`` (13.1.4) -- is
@@ -41,6 +50,7 @@ from ...scenario import (
     ScActionNode, ScActionTree, ScActivityScope, ScScopeConstraint,
     ScScopeProblem, ScScopeVar, ScTraversalSite, ScopeConstraintKind, ScopeKind,
 )
+from ...constraint import ConstraintExpr
 from ..validate import UnsupportedConstructError
 from .constraints import (constraint_sites, expr_to_constraints,
                           stmt_to_constraints, type_constraints)
@@ -158,6 +168,8 @@ class Layouts:
         self.types = types
         self._done: Dict[str, TypeLayout] = {}
         self._open: List[str] = []
+        #: why a type has no layout (``try_get`` returned None)
+        self.errors: Dict[str, UnsupportedConstructError] = {}
 
     def get(self, qname: str, loc=None) -> TypeLayout:
         lay = self._done.get(qname)
@@ -183,7 +195,8 @@ class Layouts:
             return None
         try:
             return self.get(qname)
-        except UnsupportedConstructError:
+        except UnsupportedConstructError as e:
+            self.errors[qname] = e
             return None
 
     # -- building -----------------------------------------------------------
@@ -308,6 +321,15 @@ class _Walker:
                 key = ("%s[%d]" % (base, idx.value)
                        if isinstance(idx, E.ExprConstant) and isinstance(idx.value, int)
                        else None)
+            if key is not None and (s.inline_constraints or s.comp_expr is not None) \
+                    and any(o.key == key and o.scope == scope and o.iters == tuple(iters)
+                            for o in lay.sites):
+                # O-P1-3: which traversal's values would a constraint over
+                # the handle see? Refused rather than guessed.
+                raise UnsupportedConstructError(
+                    "handle %r is traversed again in the same activity scope, "
+                    "with an inline constraint; traverse it in a block of its "
+                    "own (13.4.8)" % s.handle, loc=_loc(s))
             lay.sites.append(_Site(s, key, scope, self._names(chain), tuple(iters),
                                    dict(consts)))
             return
@@ -383,11 +405,19 @@ class _Find:
         self.up[self.find(a)] = self.find(b)
 
 
+def _owner(qname: str) -> str:
+    """The component type an action is declared in."""
+    return qname.rsplit("::", 1)[0]
+
+
 class TreeBuilder:
     """Builds the :class:`ScActionTree` of one exported action."""
 
-    def __init__(self, layouts: Layouts):
+    def __init__(self, layouts: Layouts, comps=None, root_comp: Optional[str] = None):
         self.layouts = layouts
+        #: ``comp_tree.CompLayouts``; None: every node runs in instance 0
+        self.comps = comps
+        self.root_comp = root_comp
 
     def build(self, root: str, qname: str) -> ScActionTree:
         self.tree = ScActionTree(root=root, type_qname=qname)
@@ -395,21 +425,43 @@ class TreeBuilder:
         self._scope_base: Dict[int, int] = {}
         self._child: Dict[Tuple[int, str], int] = {}
         self._site_src: Dict[int, _Site] = {}
-        lay = self.layouts.get(qname, loc=_loc(self.layouts.types.get(qname)))
-        self._node(lay, 0, "", None, None, None)
+        dt = self.layouts.types.get(qname)
+        lay = self.layouts.get(qname, loc=_loc(dt))
+        self._node(lay, 0, "", None, None, None, _loc(dt))
         self.tree.size = lay.size
+        # A node choosing among instances holds its choice in a slot of its own.
+        self._aux: Dict[int, int] = {}
+        for n in self.tree.nodes:
+            if len(n.comp) > 1:
+                n.comp_slot = self.tree.size
+                self._aux[n.comp_slot] = n.id
+                self.tree.size += 1
         self._cones()
         return self.tree
+
+    def _candidates(self, qname: str, parent: Optional[int], loc) -> List[int]:
+        if self.comps is None:
+            return [0]
+        ctx = (_owner(self.tree.nodes[parent].type_qname) if parent is not None
+               else self.root_comp)
+        cands = self.comps.candidates(ctx, _owner(qname))
+        if not cands:
+            raise UnsupportedConstructError(
+                "action %r runs in component %r, which is not instantiated in "
+                "the subtree of %r, its context (9.1.5.1)"
+                % (qname, _owner(qname), ctx), loc=loc)
+        return cands
 
     # -- nodes, scopes, sites -------------------------------------------------
 
     def _node(self, lay: TypeLayout, base: int, path: str, parent: Optional[int],
-              decl_scope: Optional[int], activity_parent: Optional[int]) -> int:
+              decl_scope: Optional[int], activity_parent: Optional[int], loc=None) -> int:
         tree = self.tree
         nid = len(tree.nodes)
+        cands = self._candidates(lay.qname, parent, loc)
         tree.nodes.append(ScActionNode(id=nid, path=path, type_qname=lay.qname,
                                        base=base, size=len(lay.own), parent=parent,
-                                       decl_scope=decl_scope))
+                                       decl_scope=decl_scope, comp=cands))
         self._lay[nid] = lay
         sbase = len(tree.scopes)
         self._scope_base[nid] = sbase
@@ -419,16 +471,18 @@ class TreeBuilder:
                 parent=(sbase + lparent) if lparent is not None else activity_parent))
         # A site's scope, for the ACTIVITY scope of the child it first reaches.
         first_site: Dict[str, int] = {}
+        first_loc: Dict[str, Any] = {}
         for st in lay.sites:
             if st.key is not None:
                 first_site.setdefault(st.key, sbase + st.scope)
+                first_loc.setdefault(st.key, _loc(st.stmt))
         for d in lay.decls:
             # A handle declared in the action body is reset on entry to the
             # activity; one declared in a block, on entry to that block.
             dscope = (sbase + d.scope) if lay.scopes else None
             cid = self._node(self.layouts.get(d.type_qname), base + d.rel_base,
                              (path + "." if path else "") + d.key, nid, dscope,
-                             first_site.get(d.key))
+                             first_site.get(d.key), first_loc.get(d.key, loc))
             tree.nodes[nid].children.append(cid)
             self._child[(nid, d.key)] = cid
         for st in lay.sites:
@@ -472,6 +526,8 @@ class TreeBuilder:
         return self._lookup(child, path[1:], dict(self._lay[child].fields))
 
     def _owner_of(self, slot: int) -> Optional[int]:
+        if slot in self._aux:
+            return self._aux[slot]
         for n in self.tree.nodes:
             if n.base <= slot < n.base + n.size:
                 return n.id
@@ -495,6 +551,89 @@ class TreeBuilder:
                         walk(v)
         walk(c)
         return out
+
+    # -- components -----------------------------------------------------------
+
+    def _comp_of(self, nid: int) -> Tuple[Optional[int], int]:
+        """Node *nid*'s instance as ``(slot, offset)``: the value of the slot
+        holding the nearest choice on its path (None: no choice, so the
+        root component's instance 0), plus a static offset."""
+        node = self.tree.nodes[nid]
+        if node.comp_slot is not None:
+            return node.comp_slot, 0
+        slot, off = (self._comp_of(node.parent) if node.parent is not None
+                     else (None, 0))
+        return slot, off + node.comp[0]
+
+    @staticmethod
+    def _comp_expr(slot: Optional[int], off: int) -> Any:
+        if slot is None:
+            return E.ExprConstant(value=off)
+        ref = E.ExprRefField(base=E.TypeExprRefSelf(), index=slot)
+        if off == 0:
+            return ref
+        return E.ExprBin(lhs=ref, op=E.BinOp.Add, rhs=E.ExprConstant(value=off))
+
+    def _comp_choice(self, nid: int) -> Any:
+        """A choice node's instance is one of its candidates."""
+        node = self.tree.nodes[nid]
+        pslot, poff = (self._comp_of(node.parent) if node.parent is not None
+                       else (None, 0))
+        me = E.ExprRefField(base=E.TypeExprRefSelf(), index=node.comp_slot)
+        return E.ExprBool(op=E.BoolOp.Or, values=[
+            E.ExprBin(lhs=me, op=E.BinOp.Eq, rhs=self._comp_expr(pslot, poff + c))
+            for c in node.comp])
+
+    def _comp_path(self, e, owner: int, target: int, loc) -> Tuple[Optional[int], int, str]:
+        """``(slot, offset, type)`` of the instance component reference *e*
+        names, in a ``with`` of a traversal of *target* from *owner*:
+        ``this.comp`` (*owner*'s), ``comp`` (*target*'s), and sub-instance
+        paths below them (``this.comp.sub1``, ``comp.ch[1]``)."""
+        if isinstance(e, E.ExprAttribute) and e.attr == "comp" and isinstance(
+                e.value, (E.TypeExprRefSelf, E.TypeExprRefTraversed)):
+            nid = owner if isinstance(e.value, E.TypeExprRefSelf) else target
+            slot, off = self._comp_of(nid)
+            return slot, off, _owner(self.tree.nodes[nid].type_qname)
+        if isinstance(e, E.ExprRefUnresolved) and e.name == "comp":
+            slot, off = self._comp_of(target)
+            return slot, off, _owner(self.tree.nodes[target].type_qname)
+        key = None
+        base = None
+        if isinstance(e, E.ExprAttribute):
+            base, key = e.value, e.attr
+        elif (isinstance(e, E.ExprSubscript) and isinstance(e.value, E.ExprAttribute)
+              and isinstance(e.slice, E.ExprConstant) and isinstance(e.slice.value, int)):
+            base, key = e.value.value, "%s[%d]" % (e.value.attr, e.slice.value)
+        if base is not None:
+            slot, off, tq = self._comp_path(base, owner, target, loc)
+            sub = self.comps.get(tq).subs.get(key)
+            if sub is not None:
+                return slot, off + sub.inst, sub.type_qname
+        raise UnsupportedConstructError(
+            "`comp == ...` names something that is not a component instance "
+            "this action can reach (this.comp, comp, or a sub-instance path "
+            "below one)", loc=loc)
+
+    def _comp_with(self, site) -> Optional[Any]:
+        """A traversal's ``comp == X``, as a constraint over instances; None
+        when it holds whatever is chosen."""
+        stmt = self._site_src[site.id].stmt
+        x = getattr(stmt, "comp_expr", None)
+        if x is None:
+            return None
+        if self.comps is None:
+            raise UnsupportedConstructError(
+                "`comp == ...` needs the component tree", loc=_loc(stmt))
+        lhs = self._comp_of(site.target)
+        rslot, roff, _ = self._comp_path(x, site.owner, site.target, _loc(stmt))
+        if lhs[0] is None and rslot is None:
+            if lhs[1] != roff:
+                raise UnsupportedConstructError(
+                    "`comp == ...` can never hold: the action's only instance "
+                    "is not the one named", loc=_loc(stmt))
+            return None
+        return E.ExprBin(lhs=self._comp_expr(*lhs), op=E.BinOp.Eq,
+                         rhs=self._comp_expr(rslot, roff))
 
     # -- constraints and cones ----------------------------------------------
 
@@ -527,7 +666,15 @@ class TreeBuilder:
                 for e in ac.stmt.constraints:
                     add(expr_to_constraints(subst_names(e, ac.consts), r),
                         ScopeConstraintKind.ACTIVITY, node.id, scope=sbase + ac.scope)
+        for node in tree.nodes:
+            if node.comp_slot is not None:
+                add([ConstraintExpr(expr=self._comp_choice(node.id))],
+                    ScopeConstraintKind.COMP, node.id)
         for site in tree.sites:
+            ce = self._comp_with(site)
+            if ce is not None:
+                add([ConstraintExpr(expr=ce)], ScopeConstraintKind.WITH,
+                    site.owner, site=site.id)
             stmt = self._site_src[site.id]
             if not getattr(stmt.stmt, "inline_constraints", None):
                 continue
@@ -581,12 +728,21 @@ class TreeBuilder:
                     node=nid, slot=slot, width=width,
                     signed=bool(getattr(leaf.datatype, "signed", False)),
                     rand=leaf.rand))
+            if node.comp_slot is not None:
+                out.append(ScScopeVar(
+                    name=(node.path + "." if node.path else "") + "comp",
+                    node=nid, slot=node.comp_slot, width=32, rand=True))
         return out
 
 
-def build_tree(layouts: Layouts, root: str, qname: str) -> ScActionTree:
-    """The :class:`ScActionTree` of action *qname*, exported as *root*."""
-    return TreeBuilder(layouts).build(root, qname)
+def build_tree(layouts: Layouts, root: str, qname: str, comps=None,
+               root_comp: Optional[str] = None) -> ScActionTree:
+    """The :class:`ScActionTree` of action *qname*, exported as *root*.
+
+    *comps* (``comp_tree.CompLayouts``) and *root_comp*, the root component
+    type, place each node in its component instances; without them every
+    node runs in the root's."""
+    return TreeBuilder(layouts, comps, root_comp).build(root, qname)
 
 
 __all__ = ["Layouts", "TypeLayout", "TreeBuilder", "build_tree"]
