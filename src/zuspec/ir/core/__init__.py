@@ -145,6 +145,9 @@ from .scenario import (
     ScIf, ScMatchCase, ScMatch,
     ScInvoke, ScSpawn, ScJoin, ScWait, ScImport, ScImportDecl,
     ScSolveVar, SolveStrategy, SolveInject, ScSolveProblem,
+    ScopeKind, COMMITTING_SCOPES, ScActivityScope, ScActionNode,
+    ScTraversalSite, ScopeConstraintKind, ScScopeVar, ScScopeConstraint,
+    ScScopeProblem, ScActionTree,
     ScActionInst, ScComponentInst,
     HarnessKind, SeedSource, ScRootAction, ScHarness, ScenarioModule,
 )

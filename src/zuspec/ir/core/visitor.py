@@ -266,6 +266,37 @@ class Visitor:
     def visitScActionInst(self, o):
         pass
 
+    def visitScActivityScope(self, o):
+        pass
+
+    def visitScActionNode(self, o):
+        pass
+
+    def visitScTraversalSite(self, o):
+        pass
+
+    def visitScScopeVar(self, o):
+        pass
+
+    def visitScScopeConstraint(self, o):
+        pass
+
+    def visitScScopeProblem(self, o):
+        for var in o.vars:
+            var.accept(self)
+        for c in o.constraints:
+            c.accept(self)
+
+    def visitScActionTree(self, o):
+        for n in o.nodes:
+            n.accept(self)
+        for sc in o.scopes:
+            sc.accept(self)
+        for st in o.sites:
+            st.accept(self)
+        for c in o.cones:
+            c.accept(self)
+
     def visitScComponentInst(self, o):
         for child in o.children:
             child.accept(self)
@@ -284,6 +315,8 @@ class Visitor:
             coro.accept(self)
         for entry in o.entries:
             entry.accept(self)
+        for tree in o.trees.values():
+            tree.accept(self)
 
 
 

@@ -89,8 +89,10 @@ class ScCoroutine(Base):
             no constraint information is silently dropped before Phase 3 wires
             up ``ConstraintCollect``; Phase 3 consumes these and clears the list.
         fields:
-            The originating action's attribute layout (:class:`ScField`), in
-            object-slot order.  Exec code names an attribute as
+            The originating action's object layout (:class:`ScField`), one
+            per slot, in slot order. A struct attribute is flattened to its
+            scalar leaves, each named by its dotted path (``s.csr.eol``;
+            ``pss_lower.layout``). Exec code names an attribute as
             ``self.<name>``; this is what resolves that name to a slot and a
             type.  Empty for synthetic coroutines.
     """
@@ -108,9 +110,10 @@ class ScCoroutine(Base):
 
 @dc.dataclass(kw_only=True)
 class ScField(Base):
-    """One attribute of an action object: its storage slot and Layer-0 type.
+    """One slot of an action object: its storage slot and Layer-0 type.
 
-    ``slot`` is the attribute's index in the action's full field list -- the
+    ``name`` is the scalar's dotted path (``x``, or ``s.f`` for a field of a
+    struct attribute). ``slot`` is its index in the flattened object -- the
     same slot a :class:`ScSolveVar` writes back to and ``ExprRefField(index=)``
     addresses.
     """
@@ -261,10 +264,18 @@ class ScInvoke(ScStmt):
             Constraint expressions from a ``with { ... }`` body on the
             traversal, carried until Phase 3 folds them into the callee's
             :class:`ScSolveProblem`.
+        child_base:
+            Where the traversed action's object starts, in slots from the
+            invoking action's own base (P1-D1). It is static: an action
+            type's subtree has the same layout wherever it is instantiated
+            (:class:`ScActionTree`). ``None`` when the site has no single
+            node (a handle-array element with a computed index, an iteration
+            of a labeled ``replicate``).
     """
     target: str = dc.field()
     inst: Optional[str] = dc.field(default=None)
     inline_constraints: List['Expr'] = dc.field(default_factory=list)
+    child_base: Optional[int] = dc.field(default=None)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScInvoke(self)
@@ -434,6 +445,212 @@ class ScSolveProblem(ScStmt):
 
 
 # ---------------------------------------------------------------------------
+# The action tree of an activation, and its solve cones (P1.2)
+# ---------------------------------------------------------------------------
+
+class ScopeKind(enum.Enum):
+    """What an :class:`ScActivityScope` is."""
+    ACTIVITY      = "activity"       # a compound action's activity
+    SEQUENCE      = "sequence"
+    PARALLEL      = "parallel"
+    SCHEDULE      = "schedule"
+    ATOMIC        = "atomic"
+    SELECT_BRANCH = "select_branch"
+    IF_THEN       = "if_then"
+    IF_ELSE       = "if_else"
+    MATCH_CASE    = "match_case"
+    LOOP_BODY     = "loop_body"      # repeat / foreach / do-while / replicate
+    REPLICATE_ITER = "replicate_iter"  # one iteration of a labeled replicate
+
+
+#: Entering a scope of one of these kinds commits the structure of the nodes
+#: it holds (design §5.4); the others commit with their enclosing scope.
+COMMITTING_SCOPES = frozenset({
+    ScopeKind.SELECT_BRANCH, ScopeKind.IF_THEN, ScopeKind.IF_ELSE,
+    ScopeKind.MATCH_CASE, ScopeKind.LOOP_BODY})
+
+
+@dc.dataclass(kw_only=True)
+class ScActivityScope(Base):
+    """One activity block of one node's activity.
+
+    Attributes:
+        id:     Index in :attr:`ScActionTree.scopes`.
+        kind:   What the block is.
+        parent: The enclosing scope; for a node's ACTIVITY scope, the scope
+                holding the node's first traversal (None for the root's).
+        node:   The node whose activity holds it.
+    """
+    id: int = dc.field()
+    kind: ScopeKind = dc.field()
+    parent: Optional[int] = dc.field(default=None)
+    node: int = dc.field()
+
+    def accept(self, v: 'Visitor') -> None:
+        v.visitScActivityScope(self)
+
+
+@dc.dataclass(kw_only=True)
+class ScActionNode(Base):
+    """One action of an activation: the root, a handle, an anonymous
+    traversal site, or an iteration's instance of one (P1-D1).
+
+    Attributes:
+        id:         Index in :attr:`ScActionTree.nodes`; the root is 0.
+        path:       Its name from the root, dotted: ``""`` for the root,
+                    ``s1.a``, ``arr[1]``, ``#2`` (the third anonymous
+                    traversal of its parent's activity, when unlabeled),
+                    ``R[0].#0``.
+        type_qname: Its action type.
+        base:       Its first slot in the activation's object.
+        size:       Its own slots (``layout.object_layout`` of its type);
+                    its children follow, in :attr:`children` order.
+        parent:     The node whose attribute or activity declares it.
+        decl_scope: The scope whose every entry leaves it uninitialized
+                    (13.4.8): the block declaring it, or for a handle
+                    declared in an action body, its parent's ACTIVITY scope.
+        children:   Child node ids.
+    """
+    id: int = dc.field()
+    path: str = dc.field(default="")
+    type_qname: str = dc.field()
+    base: int = dc.field(default=0)
+    size: int = dc.field(default=0)
+    parent: Optional[int] = dc.field(default=None)
+    decl_scope: Optional[int] = dc.field(default=None)
+    children: List[int] = dc.field(default_factory=list)
+
+    def accept(self, v: 'Visitor') -> None:
+        v.visitScActionNode(self)
+
+
+@dc.dataclass(kw_only=True)
+class ScTraversalSite(Base):
+    """One traversal statement, in one node's activity.
+
+    Attributes:
+        id:     Index in :attr:`ScActionTree.sites`.
+        owner:  The node whose activity holds the statement.
+        target: The node it traverses.
+        scope:  The scope the statement is in.
+    """
+    id: int = dc.field()
+    owner: int = dc.field()
+    target: int = dc.field()
+    scope: int = dc.field()
+
+    def accept(self, v: 'Visitor') -> None:
+        v.visitScTraversalSite(self)
+
+
+class ScopeConstraintKind(enum.Enum):
+    """Where a constraint of an :class:`ScScopeProblem` comes from, which
+    decides when it is in force."""
+    TYPE     = "type"      # a constraint of a node's type: while its nodes exist
+    ACTIVITY = "activity"  # an activity `constraint`: in its scope (13.1.9)
+    WITH     = "with"      # an inline `with`: at its traversal only (13.1.4)
+
+
+@dc.dataclass(kw_only=True)
+class ScScopeVar(Base):
+    """A variable of an :class:`ScScopeProblem`: one slot of one node.
+
+    A non-rand slot a constraint reads is a variable too, pinned to its value
+    in the object when the problem is solved.
+    """
+    name: str = dc.field()
+    node: int = dc.field()
+    slot: int = dc.field()
+    width: int = dc.field(default=32)
+    signed: bool = dc.field(default=False)
+    rand: bool = dc.field(default=True)
+
+    def accept(self, v: 'Visitor') -> None:
+        v.visitScScopeVar(self)
+
+
+@dc.dataclass(kw_only=True)
+class ScScopeConstraint(Base):
+    """One constraint of an :class:`ScScopeProblem`, with when it holds.
+
+    Attributes:
+        constraint: The constraint; its references are ``ExprRefField``
+                    slots of the activation's object. A reference that did
+                    not resolve is left as written, for the backend to refuse.
+        nodes:      The nodes it reads.
+        kind:       Where it comes from.
+        owner:      The node whose type, activity or traversal declares it.
+        scope:      ACTIVITY: the scope it is declared in.
+        site:       WITH: the traversal it belongs to.
+    """
+    constraint: 'Constraint' = dc.field()
+    nodes: List[int] = dc.field(default_factory=list)
+    kind: ScopeConstraintKind = dc.field(default=ScopeConstraintKind.TYPE)
+    owner: int = dc.field(default=0)
+    scope: Optional[int] = dc.field(default=None)
+    site: Optional[int] = dc.field(default=None)
+
+    def accept(self, v: 'Visitor') -> None:
+        v.visitScScopeConstraint(self)
+
+
+@dc.dataclass(kw_only=True)
+class ScScopeProblem(Base):
+    """A connected cone of an activation (P1-D2, LRM 13.4.9, 13.4.10).
+
+    The nodes whose values are tied by constraints -- a parent's constraint
+    over its sub-actions' attributes, a `with`, an activity constraint -- and
+    every such constraint. Each traversal of a node here solves the whole
+    problem, with the values already committed pinned and only the
+    constraints in force enabled, and commits only the traversed node's
+    values: so a value is chosen with lookahead over the constraints the rest
+    of the activity will impose. A node no constraint ties to another keeps
+    its own :class:`ScSolveProblem` (P1-D3) and is in no cone.
+    """
+    id: int = dc.field()
+    nodes: List[int] = dc.field(default_factory=list)
+    vars: List[ScScopeVar] = dc.field(default_factory=list)
+    constraints: List[ScScopeConstraint] = dc.field(default_factory=list)
+
+    def accept(self, v: 'Visitor') -> None:
+        v.visitScScopeProblem(self)
+
+
+@dc.dataclass(kw_only=True)
+class ScActionTree(Base):
+    """The static action tree of one exported action (P1-D1).
+
+    Every handle and anonymous traversal site, recursively through compound
+    types, laid out in ONE object of :attr:`size` slots: node ``n`` owns
+    ``n.base .. n.base + n.size``. An action type's subtree has the same
+    layout wherever it is instantiated, which is what makes
+    :attr:`ScInvoke.child_base` static.
+    """
+    root: str = dc.field()
+    type_qname: str = dc.field()
+    size: int = dc.field(default=0)
+    nodes: List[ScActionNode] = dc.field(default_factory=list)
+    scopes: List[ScActivityScope] = dc.field(default_factory=list)
+    sites: List[ScTraversalSite] = dc.field(default_factory=list)
+    cones: List[ScScopeProblem] = dc.field(default_factory=list)
+
+    def accept(self, v: 'Visitor') -> None:
+        v.visitScActionTree(self)
+
+    def node_at(self, path: str) -> ScActionNode:
+        for n in self.nodes:
+            if n.path == path:
+                return n
+        raise KeyError(path)
+
+    def cone_of(self, node: int) -> Optional[ScScopeProblem]:
+        for c in self.cones:
+            if node in c.nodes:
+                return c
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Instances & module registry
 # ---------------------------------------------------------------------------
 
@@ -557,6 +774,12 @@ class ScenarioModule(Base):
     deferred_actions: List[str] = dc.field(default_factory=list)
     imports: List['ScImportDecl'] = dc.field(default_factory=list)
     entries: List[ScHarness] = dc.field(default_factory=list)
+    #: The Layer-0 types by name (qualified and bare), so a backend can lay
+    #: out a struct a local is declared with (``pss_lower.layout``): its base
+    #: is a by-name reference.
+    types: Dict[str, 'DataType'] = dc.field(default_factory=dict)
+    #: The action tree of each exported action, by coroutine name.
+    trees: Dict[str, ScActionTree] = dc.field(default_factory=dict)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScenarioModule(self)
@@ -592,6 +815,16 @@ __all__ = [
     "SolveStrategy",
     "SolveInject",
     "ScSolveProblem",
+    "ScopeKind",
+    "COMMITTING_SCOPES",
+    "ScActivityScope",
+    "ScActionNode",
+    "ScTraversalSite",
+    "ScopeConstraintKind",
+    "ScScopeVar",
+    "ScScopeConstraint",
+    "ScScopeProblem",
+    "ScActionTree",
     "ScActionInst",
     "ScComponentInst",
     "HarnessKind",

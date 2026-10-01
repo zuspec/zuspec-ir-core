@@ -84,6 +84,10 @@ class Field(Base):
     # Declared with the `action` modifier (LRM 13.4.1, Ex 173): not rand, but
     # randomized when an activity traverses it, as an action handle is.
     action_qualified : bool = dc.field(default=False)
+    # The qualified name the front end's linker resolved the declared type to
+    # (an array's: its element type's), e.g. ``pss_top::B`` for ``B b1;``.
+    # ``datatype`` may be a by-name ``DataTypeRef`` that names it as written.
+    type_qname : Optional[str] = dc.field(default=None)
     domain : Optional[tuple] = dc.field(default=None)  # Domain constraint (min, max) tuple or list of values
     size : Optional[int] = dc.field(default=None)  # Array size (for fixed-size arrays)
     max_size : Optional[int] = dc.field(default=None)  # Maximum size for variable-size arrays

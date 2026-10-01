@@ -17,28 +17,18 @@ from ...scenario import (
     ScSeq, ScInvoke, ScLoop, ScIf, ScMatch, ScMatchCase, ScAtomic,
     ScPar, ScSelect, ScSelectBranch, ScImport, ScImportDecl,
 )
-from ...stmt import StmtExpr
+from ...stmt import StmtExpr, StmtAssign
 from ...expr import ExprCall, ExprAttribute, TypeExprRefSelf, ExprRefUnresolved
 from ..validate import ScenarioValidator, UnsupportedConstructError
-from .constraints import collect_solve_problem
+from .constraints import (LIFECYCLE_FUNCS, collect_solve_problem,
+                          is_pending_constraint)
+from .layout import object_layout, prefix_self
+from .action_tree import Layouts, build_tree
 
 _log = logging.getLogger("zuspec.ir.xf.pss_lower")
 
-# Function names that are part of the action lifecycle rather than constraints.
-_LIFECYCLE_FUNCS = ("body", "pre_solve", "post_solve")
-
-
-def _is_pending_constraint(f) -> bool:
-    """Does function *f* hold constraints that are in force on its type?
-
-    A non-lifecycle function on an action is assumed to be a named constraint
-    block. The exception is a generic constraint (PSS 3.1 §13.1.2), which is a
-    template: it is inert until referenced, so collecting it here would put a
-    body -- and its unbound parameters -- into the solve problem.
-    """
-    if getattr(f, "name", None) in _LIFECYCLE_FUNCS:
-        return False
-    return not (getattr(f, "metadata", None) or {}).get("_is_generic_constraint")
+_LIFECYCLE_FUNCS = LIFECYCLE_FUNCS
+_is_pending_constraint = is_pending_constraint
 
 
 def _get_type_map(ctx: Any) -> Dict[str, Any]:
@@ -58,11 +48,36 @@ def _get_type_map(ctx: Any) -> Dict[str, Any]:
         % type(ctx).__name__)
 
 
-def _field_layout(dt: Any) -> List[ScField]:
-    """The action's attributes in object-slot order (the full field list)."""
-    return [ScField(name=f.name, slot=i, datatype=getattr(f, "datatype", None),
-                    rand=getattr(f, "rand_kind", None) is not None)
-            for i, f in enumerate(getattr(dt, "fields", []) or [])]
+def _field_layout(dt: Any, types: Dict[str, Any]) -> List[ScField]:
+    """The action's object slots, in order: one per scalar, a struct
+    attribute flattened to its leaves (``layout.object_layout``)."""
+    return [ScField(name=leaf.name, slot=i, datatype=leaf.datatype, rand=leaf.rand)
+            for i, leaf in enumerate(
+                object_layout(getattr(dt, "fields", []) or [], types))]
+
+
+def _self_path(path) -> Any:
+    e = TypeExprRefSelf()
+    for name in path:
+        e = ExprAttribute(value=e, attr=name)
+    return e
+
+
+def _init_block(dt: Any, types: Dict[str, Any]) -> Optional[ScExecBlock]:
+    """The attributes' declared initial values, as the object's first code.
+
+    ``bit[4] g = 3;`` on an action, or on a field of a struct attribute
+    (LRM 8.5.3), used to be read as 0 on bc: nothing applied it. A rand
+    attribute's initial value is applied too; its solve overwrites it.
+    """
+    stmts = []
+    for leaf in object_layout(getattr(dt, "fields", []) or [], types):
+        init = getattr(leaf.field, "initial_value", None)
+        if init is not None:
+            # A struct field's initializer is written against the struct.
+            stmts.append(StmtAssign(targets=[_self_path(leaf.path)],
+                                    value=prefix_self(init, leaf.path[:-1])))
+    return ScExecBlock(kind="init", stmts=stmts) if stmts else None
 
 
 def _walk_invokes(stmts):
@@ -136,7 +151,7 @@ class PSSToScenarioPass:
     # ------------------------------------------------------------------
     def lower(self, ctx: Any) -> ScenarioModule:
         type_map = _get_type_map(ctx)
-        module = ScenarioModule()
+        module = ScenarioModule(types=type_map)
 
         # --- imports: assign stable ids; build the lookup + module decls ---
         self._imports = {}
@@ -182,6 +197,7 @@ class PSSToScenarioPass:
         # type; coroutines are keyed by simple name (design O5: qualified
         # keys come with non-root components, P1).
         self._type_map = type_map
+        self._layouts = Layouts(type_map)
         self._coro_of: Dict[str, str] = {}
         for qname, dt in owned:
             simple = qname.rsplit("::", 1)[-1]
@@ -198,6 +214,8 @@ class PSSToScenarioPass:
         for qname, dt in owned:
             self.validator.check_action(qname, dt)
             self._cur_action = dt
+            self._cur_qname = qname
+            self._cur_layout = self._layouts.try_get(qname)
             if dt.activity_ir is not None:
                 coro = self._lower_compound(qname, dt)   # ScheduleNormalize
             else:
@@ -206,7 +224,7 @@ class PSSToScenarioPass:
                 # ConstraintCollect: rand fields + named constraints → a leading
                 # ScSolveProblem; clears pending_constraints so nothing is left
                 # dangling (the lifecycle becomes solve → body/activity).
-                problem = collect_solve_problem(coro, dt)
+                problem = collect_solve_problem(coro, dt, type_map)
                 if problem is not None:
                     idx = 0
                     if (coro.body and isinstance(coro.body[0], ScExecBlock)
@@ -214,7 +232,10 @@ class PSSToScenarioPass:
                         idx = 1
                     coro.body.insert(idx, problem)
                     coro.pending_constraints = []
-            coro.fields = _field_layout(dt)
+            coro.fields = _field_layout(dt, type_map)
+            init = _init_block(dt, type_map)
+            if init is not None:
+                coro.body.insert(0, init)
             module.add_coroutine(coro)
 
         # Every traversal must name a coroutine of this module. A backend
@@ -242,6 +263,13 @@ class PSSToScenarioPass:
             module.export_actions = exports
         else:
             module.export_actions = self._auto_exports(module)
+
+        # The action tree of each export (P1.2): its nodes, and the cones of
+        # constraints that tie them.
+        for name in module.export_actions:
+            coro = module.coroutines.get(name)
+            if coro is not None and coro.action_type is not None:
+                module.trees[name] = build_tree(self._layouts, name, coro.action_type)
 
         return module
 
@@ -502,6 +530,10 @@ class PSSToScenarioPass:
                     return why
         return None
 
+    def _child_base(self, s) -> Optional[int]:
+        lay = getattr(self, "_cur_layout", None)
+        return lay.child_base(s) if lay is not None else None
+
     def _lower_activity(self, act) -> List:
         """Lower the top-level activity into a coroutine body (a list of ops)."""
         if act is None:
@@ -529,8 +561,7 @@ class PSSToScenarioPass:
                 "data field %r declared in an activity block is not "
                 "supported yet (P1.4)" % s.field.name, loc=s.getLoc())
 
-    @staticmethod
-    def _refuse_unlowered_traversal_parts(s):
+    def _refuse_unlowered_traversal_parts(self, s):
         """Refuse what a traversal carries and this pass does not lower yet.
 
         Each of these used to be ignored, and the traversal ran as though
@@ -538,10 +569,12 @@ class PSSToScenarioPass:
         element, ``comp == X`` ran the action in whatever instance, and
         Python-front-end flow bindings were not bound.
         """
-        if getattr(s, "index", None) is not None:
+        if getattr(s, "index", None) is not None and self._child_base(s) is None:
+            # A constant index names a node of the action tree (P1.2); a
+            # computed one would choose among them at run time.
             raise UnsupportedConstructError(
-                "traversal of an element of the handle array %r is not "
-                "supported yet (P1.2)" % s.handle, loc=s.getLoc())
+                "traversal of an element of the handle array %r with a "
+                "computed index is not supported yet" % s.handle, loc=s.getLoc())
         if getattr(s, "comp_expr", None) is not None:
             raise UnsupportedConstructError(
                 "a traversal constrained with `comp == ...` is not supported "
@@ -570,7 +603,8 @@ class PSSToScenarioPass:
                     "later phase" % s.action_type, loc=s.getLoc(),
                     remedy="use a named constraint on the action for now")
             target = self._traversal_target(s, s.type_qname, s.action_type)
-            return ScInvoke(target=target, inst=s.label).copy_loc(s)
+            return ScInvoke(target=target, inst=s.label,
+                            child_base=self._child_base(s)).copy_loc(s)
 
         if isinstance(s, ActivityTraversal):
             if s.inline_constraints:
@@ -587,7 +621,8 @@ class PSSToScenarioPass:
                         break
             target = self._traversal_target(s, s.type_qname, written,
                                             what="handle %r" % s.handle)
-            return ScInvoke(target=target, inst=s.handle).copy_loc(s)
+            return ScInvoke(target=target, inst=s.handle,
+                            child_base=self._child_base(s)).copy_loc(s)
 
         if isinstance(s, ActivityDoWhile):
             # `repeat {...} while (c);`: the body runs before the first test.
@@ -599,10 +634,13 @@ class PSSToScenarioPass:
             # sequence: a counted loop, while nothing names the per-iteration
             # instances. (In parallel/schedule it is refused below.)
             if s.label is not None:
+                # Each iteration runs its own nodes of the action tree, at
+                # its own base: a loop cannot, until P1.4 unrolls it.
+                self._layouts.get(self._cur_qname, loc=s.getLoc())  # O4 refusal
                 raise UnsupportedConstructError(
-                    "replicate with an iteration label (%s[]) names each "
-                    "iteration's instances; that is P1" % s.label,
-                    loc=s.getLoc())
+                    "replicate with an iteration label (%s[]) is not supported "
+                    "yet (P1.4): each iteration runs its own instances"
+                    % s.label, loc=s.getLoc())
             return ScLoop(kind="repeat", count=s.count, index_var=s.index_var,
                           body=self._lower_stmts(s.body)).copy_loc(s)
 
