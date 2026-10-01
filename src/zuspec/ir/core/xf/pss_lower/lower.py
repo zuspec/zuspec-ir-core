@@ -177,12 +177,17 @@ class PSSToScenarioPass:
                  :func:`coro_key` accepts.  When ``None``, the model's
                  ``export`` declarations, else every root action nothing
                  traverses.
+        lookahead: Test only. False switches value lookahead off
+                 (:attr:`~...scenario.ScActionTree.lookahead`), to show that a
+                 lookahead test fails without it (P1.6).
     """
 
     def __init__(self, root: Optional[str] = None,
                  exports: Optional[List[str]] = None,
-                 solve_constraints: bool = True):
+                 solve_constraints: bool = True,
+                 lookahead: bool = True):
         self.root = root
+        self.lookahead = lookahead
         self.exports = exports
         # When True (Phase 3+), ConstraintCollect runs and the lifecycle gains a
         # leading ScSolveProblem; when False the Phase-1 behavior is preserved
@@ -344,6 +349,7 @@ class PSSToScenarioPass:
                     self._layouts, name, coro.action_type,
                     comps=self._comps if module.comp_tree is not None else None,
                     root_comp=root)
+                module.trees[name].lookahead = self.lookahead
 
         return module
 

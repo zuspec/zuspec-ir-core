@@ -686,6 +686,11 @@ class ScActionTree(Base):
     scopes: List[ScActivityScope] = dc.field(default_factory=list)
     sites: List[ScTraversalSite] = dc.field(default_factory=list)
     cones: List[ScScopeProblem] = dc.field(default_factory=list)
+    #: False only for calibration (P1.6, design §5.4 ``greedy-nohoist``): a
+    #: traversal's solve sees only the constraints over its own values and
+    #: values already committed -- none over a node still to be traversed.
+    #: A lookahead test that passes this way is not testing lookahead.
+    lookahead: bool = dc.field(default=True)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScActionTree(self)
