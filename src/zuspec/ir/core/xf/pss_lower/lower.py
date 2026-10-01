@@ -9,7 +9,7 @@ from ...activity import (
     ActivitySequenceBlock, ActivityAnonTraversal, ActivityTraversal,
     ActivityRepeat, ActivityForeach, ActivityIfElse, ActivityMatch, MatchCase,
     ActivityAtomic, ActivityParallel, ActivitySchedule, ActivitySelect,
-    ActivityDoWhile, ActivityReplicate, ActivitySchedulingConstraint,
+    ActivityDoWhile, ActivityReplicate, ActivitySchedulingConstraint, ActivityFieldDecl,
 )
 from ...fields import FieldKind
 from ...scenario import (
@@ -494,7 +494,8 @@ class PSSToScenarioPass:
             chain = self._type_map.get(getattr(sup, "ref_name", None))
         act = getattr(dt, "activity_ir", None)
         for st in _walk_activity(act.stmts if act is not None else []):
-            sub = getattr(st, "type_qname", None)
+            sub = (st.type_qname if isinstance(
+                st, (ActivityTraversal, ActivityAnonTraversal)) else None)
             if sub is not None:
                 why = self._interaction(sub, seen)
                 if why is not None:
@@ -506,11 +507,27 @@ class PSSToScenarioPass:
         if act is None:
             return []
         if isinstance(act, ActivitySequenceBlock):
-            return [self._lower_activity_stmt(s) for s in act.stmts]
-        return [self._lower_activity_stmt(act)]
+            return self._lower_stmts(act.stmts)
+        return self._lower_stmts([act])
 
     def _lower_stmts(self, stmts) -> List:
-        return [self._lower_activity_stmt(s) for s in stmts]
+        """A block's statements as ops. A declaration is not a statement: a
+        handle needs nothing until P1.2 gives it a node (a traversal names
+        its type itself), and a data field is refused."""
+        out = []
+        for s in stmts:
+            if isinstance(s, ActivityFieldDecl):
+                self._check_field_decl(s)
+                continue
+            out.append(self._lower_activity_stmt(s))
+        return out
+
+    @staticmethod
+    def _check_field_decl(s) -> None:
+        if s.type_qname is None:
+            raise UnsupportedConstructError(
+                "data field %r declared in an activity block is not "
+                "supported yet (P1.4)" % s.field.name, loc=s.getLoc())
 
     @staticmethod
     def _refuse_unlowered_traversal_parts(s):
@@ -529,6 +546,10 @@ class PSSToScenarioPass:
             raise UnsupportedConstructError(
                 "a traversal constrained with `comp == ...` is not supported "
                 "yet (P1.5)", loc=s.getLoc())
+        if getattr(s, "initializers", None):
+            raise UnsupportedConstructError(
+                "traversal initializers ({.x = ...}) are not supported yet "
+                "(P1.4)", loc=s.getLoc())
         if getattr(s, "init_bindings", None):
             raise UnsupportedConstructError(
                 "flow bindings on a traversal (%s) are not lowered by this "

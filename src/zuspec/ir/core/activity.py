@@ -23,6 +23,7 @@ Node hierarchy::
     ├── ActivityMatch           -- match subject: case ...:
     ├── ActivityReplicate       -- for i in replicate(N)
     ├── ActivityConstraint      -- with constraint(): ...
+    ├── ActivityFieldDecl       -- a data field or handle declared in a block
     └── ActivityBind            -- bind(src, dst)
 """
 from __future__ import annotations
@@ -169,12 +170,23 @@ class ActivityTraversal(ActivityStmt):
                             the traversal does not constrain ``comp``. A
                             consumer that cannot place an action in a chosen
                             instance must refuse it, never ignore it.
+        initializers:       ``{.x = v, .s.f = w}`` (LRM 11.3.1) as
+                            ``(target, value)`` pairs, applied in order
+                            before ``pre_solve`` (11.3.1 b i-ii). A target
+                            is rooted at ``TypeExprRefTraversed``; a value
+                            resolves in the enclosing scope. The handle
+                            declaration's own initializers come first, then
+                            the traversal's.
+
+    Names in ``inline_constraints`` that the front end resolved in the
+    traversed action are rooted at ``TypeExprRefTraversed`` (13.1.4).
     """
     handle: str = dc.field()
     index: Optional['Expr'] = dc.field(default=None)
     inline_constraints: List['Expr'] = dc.field(default_factory=list)
     type_qname: Optional[str] = dc.field(default=None)
     comp_expr: Optional['Expr'] = dc.field(default=None)
+    initializers: List[Tuple['Expr', 'Expr']] = dc.field(default_factory=list)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitActivityTraversal(self)
@@ -198,6 +210,12 @@ class ActivityAnonTraversal(ActivityStmt):
                             written. None when the producer resolved nothing.
         comp_expr:          As on ``ActivityTraversal``: the instance a
                             ``do T with { comp == X; }`` steers to.
+        initializers:       ``{.x = v, .s.f = w}`` (LRM 11.3.1) as
+                            ``(target, value)`` pairs, applied in order
+                            before ``pre_solve`` (11.3.1 b i-ii). A target
+                            is rooted at ``TypeExprRefTraversed``; a value
+                            resolves in the enclosing scope. (A type traversal
+                            has no declaration of its own.)
     """
     action_type: str = dc.field()
     type_qname: Optional[str] = dc.field(default=None)
@@ -205,6 +223,7 @@ class ActivityAnonTraversal(ActivityStmt):
     inline_constraints: List['Expr'] = dc.field(default_factory=list)
     action_type_cls: Optional[type] = dc.field(default=None)
     comp_expr: Optional['Expr'] = dc.field(default=None)
+    initializers: List[Tuple['Expr', 'Expr']] = dc.field(default_factory=list)
     init_bindings: List[Tuple[str, str, str]] = dc.field(default_factory=list)
     # Each tuple: (target_field_name, src_label, src_attr)
     # e.g. ("fetch", "fetch", "result") for fetch=fetch.result
@@ -311,6 +330,30 @@ class ActivityReplicate(ActivityStmt):
 
     def accept(self, v: 'Visitor') -> None:
         v.visitActivityReplicate(self)
+
+
+@dc.dataclass(kw_only=True)
+class ActivityFieldDecl(ActivityStmt):
+    """A declaration in an activity block (LRM 11.2.1): an action handle
+    (``B b2;``) or a data field (``action bit[4] n;``).
+
+    It belongs to the activity scope that declares it: a handle is reset to
+    uninitialized on each entry to that scope (11.3.1 b). A traversal of it
+    names it as ``ActivityTraversal.handle`` and carries its declaration's
+    initializers itself, so this node holds only what the scope owns.
+
+    Attributes:
+        field:       The declaration. A handle's ``datatype`` is a
+                     ``DataTypeRef`` to its action type; a data field
+                     declared ``action`` has ``field.action_qualified``.
+        type_qname:  A handle's action type as the linker resolved it, or
+                     None for a data field.
+    """
+    field: 'Any' = dc.field()
+    type_qname: Optional[str] = dc.field(default=None)
+
+    def accept(self, v: 'Visitor') -> None:
+        v.visitActivityFieldDecl(self)
 
 
 # ---------------------------------------------------------------------------

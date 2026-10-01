@@ -114,6 +114,9 @@ class Visitor:
         for stmt in o.body:
             stmt.accept(self)
 
+    def visitActivityFieldDecl(self, o):
+        pass
+
     def visitActivityReplicate(self, o):
         for stmt in o.body:
             stmt.accept(self)

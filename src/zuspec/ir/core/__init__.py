@@ -73,7 +73,8 @@ from .data_type import (
 )
 from .expr import (
     Expr, BinOp, UnaryOp, BoolOp, CmpOp, AugOp,
-    ExprBin, ExprRef, ExprConstant, TypeExprRefSelf, TypeExprRefSuper, ExprRefField,
+    ExprBin, ExprRef, ExprConstant, TypeExprRefSelf, TypeExprRefSuper, TypeExprRefTraversed,
+    ExprRefField,
     ExprRefParam, ExprRefLocal, ExprRefUnresolved, ExprRefPy,
     ExprRefBottomUp, ExprUnary, ExprBool, ExprCompare,
     ExprAttribute, ExprSlice, ExprSubscript, ExprCall, Keyword, ExprAwait,
@@ -127,6 +128,7 @@ from .activity import (
     MatchCase,
     ActivityMatch,
     ActivityConstraint,
+    ActivityFieldDecl,
     ActivityBind,
     ActivitySchedulingConstraint,
 )
@@ -186,7 +188,7 @@ __all__ = [
     # Interface-protocol types
     "IfProtocolProperties","IfProtocolType","CompletionType","QueueType",
     "Expr","BinOp","UnaryOp","BoolOp","CmpOp","AugOp","ExprBin","ExprRef","ExprConstant",
-    "TypeExprRefSelf","TypeExprRefSuper","ExprRefField","ExprRefParam","ExprRefLocal","ExprRefUnresolved",
+    "TypeExprRefSelf","TypeExprRefSuper","TypeExprRefTraversed","ExprRefField","ExprRefParam","ExprRefLocal","ExprRefUnresolved",
     "ExprRefPy","ExprRefBottomUp","ExprUnary",
     "ExprBool","ExprCompare","ExprAttribute","ExprSlice","ExprSubscript","ExprCall","Keyword","ExprAwait",
     # PSS-specific expressions
@@ -216,7 +218,7 @@ __all__ = [
     "ActivityRepeat","ActivityDoWhile","ActivityWhileDo","ActivityForeach","ActivityReplicate",
     "SelectBranch","ActivitySelect",
     "ActivityIfElse","MatchCase","ActivityMatch",
-    "ActivityConstraint","ActivityBind","ActivitySchedulingConstraint",
+    "ActivityConstraint","ActivityFieldDecl","ActivityBind","ActivitySchedulingConstraint",
     # M0 foundations
     "Provenance","DomainNode","Connection","Signal","Bundle","MethodInterface",
     "PortConnection","ModuleInstance",

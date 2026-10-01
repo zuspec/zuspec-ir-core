@@ -81,6 +81,9 @@ class Field(Base):
     
     # Constraint solver metadata
     rand_kind : Optional[RandKind] = dc.field(default=None)  # RAND, RANDC, or None
+    # Declared with the `action` modifier (LRM 13.4.1, Ex 173): not rand, but
+    # randomized when an activity traverses it, as an action handle is.
+    action_qualified : bool = dc.field(default=False)
     domain : Optional[tuple] = dc.field(default=None)  # Domain constraint (min, max) tuple or list of values
     size : Optional[int] = dc.field(default=None)  # Array size (for fixed-size arrays)
     max_size : Optional[int] = dc.field(default=None)  # Maximum size for variable-size arrays

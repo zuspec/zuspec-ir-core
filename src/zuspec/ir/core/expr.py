@@ -81,6 +81,23 @@ class TypeExprRefSuper(ExprRef):
     """
     ...
 
+@dc.dataclass
+class TypeExprRefTraversed(ExprRef):
+    """The action a traversal names, where its own names are in scope.
+
+    Inside a traversal's ``with`` block, a name resolves in the traversed
+    action first and in the enclosing scope after (LRM 13.1.4, Ex 142); the
+    left side of an initializer (``{.x = v}``) names the traversed action's
+    member only (11.3.1 d). ``b1 with { x < px; }`` with ``x`` a member of
+    ``b1`` and ``px`` of the enclosing action is
+    ``ExprAttribute(TypeExprRefTraversed(), 'x') < ExprAttribute(self, 'px')``.
+
+    It is a node of its own, not ``self.b1``, because a ``do T with``
+    traversal has no handle to name: a consumer binds it to the traversed
+    instance, whichever form wrote it. Outside a traversal it is meaningless.
+    """
+    ...
+
 @dc.dataclass(kw_only=True)
 class ExprRefField(ExprRef):
     """Reference to a field relative to the base expression"""
