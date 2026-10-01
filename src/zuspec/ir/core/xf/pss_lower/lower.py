@@ -1,6 +1,7 @@
 """PSS → Scenario lowering pass implementation (Phase 1 slice)."""
 from __future__ import annotations
 
+import dataclasses as dc
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -10,6 +11,7 @@ from ...activity import (
     ActivityRepeat, ActivityForeach, ActivityIfElse, ActivityMatch, MatchCase,
     ActivityAtomic, ActivityParallel, ActivitySchedule, ActivitySelect,
     ActivityDoWhile, ActivityReplicate, ActivitySchedulingConstraint, ActivityFieldDecl,
+    ActivityConstraint,
 )
 from ...fields import FieldKind
 from ...scenario import (
@@ -18,11 +20,12 @@ from ...scenario import (
     ScPar, ScSelect, ScSelectBranch, ScImport, ScImportDecl,
 )
 from ...stmt import StmtExpr, StmtAssign
-from ...expr import ExprCall, ExprAttribute, TypeExprRefSelf, ExprRefUnresolved
+from ...expr import (Expr, ExprCall, ExprAttribute, TypeExprRefSelf, TypeExprRefTraversed,
+                     ExprRefUnresolved)
 from ..validate import ScenarioValidator, UnsupportedConstructError
 from .constraints import (LIFECYCLE_FUNCS, collect_solve_problem,
                           is_pending_constraint)
-from .layout import object_layout, prefix_self
+from .layout import object_layout, prefix_self, subst_names
 from .action_tree import Layouts, build_tree
 
 _log = logging.getLogger("zuspec.ir.xf.pss_lower")
@@ -78,6 +81,24 @@ def _init_block(dt: Any, types: Dict[str, Any]) -> Optional[ScExecBlock]:
             stmts.append(StmtAssign(targets=[_self_path(leaf.path)],
                                     value=prefix_self(init, leaf.path[:-1])))
     return ScExecBlock(kind="init", stmts=stmts) if stmts else None
+
+
+def _root_traversed(e: Any, path) -> Any:
+    """*e* with the traversed action (``TypeExprRefTraversed``) as the child
+    node at *path* of the invoking action."""
+    if isinstance(e, TypeExprRefTraversed):
+        return _self_path(path)
+    if dc.is_dataclass(e) and not isinstance(e, type):
+        repl = {}
+        for f in dc.fields(e):
+            val = getattr(e, f.name)
+            if isinstance(val, Expr):
+                repl[f.name] = _root_traversed(val, path)
+            elif isinstance(val, list) and any(isinstance(x, Expr) for x in val):
+                repl[f.name] = [_root_traversed(x, path) if isinstance(x, Expr) else x
+                                for x in val]
+        return dc.replace(e, **repl) if repl else e
+    return e
 
 
 def _walk_invokes(stmts):
@@ -147,6 +168,8 @@ class PSSToScenarioPass:
         # (constraints parked on pending_constraints, no ScSolveProblem).
         self.solve_constraints = solve_constraints
         self.validator = ScenarioValidator()
+        #: labeled-replicate iterations being lowered (action tree site keys)
+        self._iters: Tuple[int, ...] = ()
 
     # ------------------------------------------------------------------
     def lower(self, ctx: Any) -> ScenarioModule:
@@ -216,6 +239,7 @@ class PSSToScenarioPass:
             self._cur_action = dt
             self._cur_qname = qname
             self._cur_layout = self._layouts.try_get(qname)
+            self._iters = ()
             if dt.activity_ir is not None:
                 coro = self._lower_compound(qname, dt)   # ScheduleNormalize
             else:
@@ -224,7 +248,11 @@ class PSSToScenarioPass:
                 # ConstraintCollect: rand fields + named constraints → a leading
                 # ScSolveProblem; clears pending_constraints so nothing is left
                 # dangling (the lifecycle becomes solve → body/activity).
-                problem = collect_solve_problem(coro, dt, type_map)
+                # A constraint through a sub-action handle belongs to the
+                # action tree's cone (P1.2), which solves it with lookahead.
+                handles = (set(self._cur_layout.fields)
+                           if self._cur_layout is not None else None)
+                problem = collect_solve_problem(coro, dt, type_map, handles)
                 if problem is not None:
                     idx = 0
                     if (coro.body and isinstance(coro.body[0], ScExecBlock)
@@ -233,6 +261,10 @@ class PSSToScenarioPass:
                     coro.body.insert(idx, problem)
                     coro.pending_constraints = []
             coro.fields = _field_layout(dt, type_map)
+            if self._cur_layout is not None:
+                coro.subtree = [
+                    ScField(name=name, slot=slot, datatype=leaf.datatype, rand=leaf.rand)
+                    for name, slot, leaf in self._layouts.subtree(qname)]
             init = _init_block(dt, type_map)
             if init is not None:
                 coro.body.insert(0, init)
@@ -532,12 +564,67 @@ class PSSToScenarioPass:
 
     def _child_base(self, s) -> Optional[int]:
         lay = getattr(self, "_cur_layout", None)
-        return lay.child_base(s) if lay is not None else None
+        return lay.child_base(s, self._iters) if lay is not None else None
+
+    def _site(self, s) -> Optional[int]:
+        lay = getattr(self, "_cur_layout", None)
+        return lay.site_index(s, self._iters) if lay is not None else None
+
+    def _unroll_replicate(self, s) -> ScSeq:
+        """``replicate (N) R[]: S``: each iteration runs its own nodes of the
+        action tree (``R[i].…``), at their own bases, so the iterations are
+        unrolled -- N is a constant (O4) -- each a block with its index
+        variable fixed."""
+        self._layouts.get(self._cur_qname, loc=s.getLoc())  # O4 refusal
+        if self._cur_layout is None:
+            raise UnsupportedConstructError(
+                "replicate with an iteration label (%s[]) needs the action "
+                "tree, and this action has none" % s.label, loc=s.getLoc())
+        saved = self._iters
+        iterations = []
+        try:
+            for i in range(s.count.value):
+                self._iters = saved + (i,)
+                body = self._lower_stmts(s.body)
+                if s.index_var:
+                    body = subst_names(body, {s.index_var: i})
+                iterations.append(ScSeq(body=body, scope=self._scope(s)).copy_loc(s))
+        finally:
+            self._iters = saved
+        return ScSeq(body=iterations).copy_loc(s)
+
+    def _traversal_init(self, s, target: str) -> List:
+        """``ScInvoke.init`` of traversal *s*: the child's initial values,
+        then its initializers in order (11.3.1 b i-ii), rooted at the
+        child's node. Empty when *s* has no initializers."""
+        inits = getattr(s, "initializers", None) or []
+        if not inits:
+            return []
+        key = self._cur_layout._site(s, self._iters).key
+        path = tuple(key.split("."))
+        child = next((q for q, n in self._coro_of.items() if n == target), None)
+        out = []
+        blk = _init_block(self._type_map.get(child), self._type_map) if child else None
+        for st in (blk.stmts if blk is not None else []):
+            out.append(prefix_self(st, path))
+        for lhs, rhs in inits:
+            out.append(StmtAssign(targets=[_root_traversed(lhs, path)],
+                                  value=_root_traversed(rhs, path)))
+        return out
+
+    def _scope(self, block, part=None) -> Optional[int]:
+        """The action tree's local scope *block* opens (``ScSeq.scope``...)."""
+        lay = getattr(self, "_cur_layout", None)
+        if lay is None:
+            return None
+        return lay.scope(block, tuple(part or ()) + tuple(self._iters))
 
     def _lower_activity(self, act) -> List:
         """Lower the top-level activity into a coroutine body (a list of ops)."""
         if act is None:
             return []
+        # The activity's top-level block is the ACTIVITY scope (local 0); the
+        # node's entry, not a statement, opens it.
         if isinstance(act, ActivitySequenceBlock):
             return self._lower_stmts(act.stmts)
         return self._lower_stmts([act])
@@ -551,6 +638,10 @@ class PSSToScenarioPass:
             if isinstance(s, ActivityFieldDecl):
                 self._check_field_decl(s)
                 continue
+            if isinstance(s, ActivityConstraint) and self._cur_layout is not None:
+                # In force while its scope is (13.1.9 b.3): the action tree
+                # holds it, tagged with that scope, and the cone solves it.
+                continue
             out.append(self._lower_activity_stmt(s))
         return out
 
@@ -559,7 +650,9 @@ class PSSToScenarioPass:
         if s.type_qname is None:
             raise UnsupportedConstructError(
                 "data field %r declared in an activity block is not "
-                "supported yet (P1.4)" % s.field.name, loc=s.getLoc())
+                "supported yet: traversing it randomizes a value with no action "
+                "(11.3.1), which the action tree has no node for" % s.field.name,
+                loc=s.getLoc())
 
     def _refuse_unlowered_traversal_parts(self, s):
         """Refuse what a traversal carries and this pass does not lower yet.
@@ -579,10 +672,10 @@ class PSSToScenarioPass:
             raise UnsupportedConstructError(
                 "a traversal constrained with `comp == ...` is not supported "
                 "yet (P1.5)", loc=s.getLoc())
-        if getattr(s, "initializers", None):
+        if getattr(s, "initializers", None) and self._site(s) is None:
             raise UnsupportedConstructError(
-                "traversal initializers ({.x = ...}) are not supported yet "
-                "(P1.4)", loc=s.getLoc())
+                "traversal initializers ({.x = ...}) need the action tree, and "
+                "this action has none", loc=s.getLoc())
         if getattr(s, "init_bindings", None):
             raise UnsupportedConstructError(
                 "flow bindings on a traversal (%s) are not lowered by this "
@@ -591,26 +684,30 @@ class PSSToScenarioPass:
 
     def _lower_activity_stmt(self, s):
         if isinstance(s, ActivitySequenceBlock):
-            return ScSeq(body=self._lower_stmts(s.stmts)).copy_loc(s)
+            return ScSeq(body=self._lower_stmts(s.stmts),
+                         scope=self._scope(s)).copy_loc(s)
 
         if isinstance(s, (ActivityAnonTraversal, ActivityTraversal)):
             self._refuse_unlowered_traversal_parts(s)
 
         if isinstance(s, ActivityAnonTraversal):
-            if s.inline_constraints:
+            if s.inline_constraints and self._site(s) is None:
                 raise UnsupportedConstructError(
-                    "inline traversal constraints (`do %s with {...}`) are a "
-                    "later phase" % s.action_type, loc=s.getLoc(),
-                    remedy="use a named constraint on the action for now")
+                    "inline traversal constraints (`do %s with {...}`) need the "
+                    "action tree, and this action has none" % s.action_type,
+                    loc=s.getLoc())
             target = self._traversal_target(s, s.type_qname, s.action_type)
             return ScInvoke(target=target, inst=s.label,
-                            child_base=self._child_base(s)).copy_loc(s)
+                            inline_constraints=list(s.inline_constraints or []),
+                            child_base=self._child_base(s),
+                            site=self._site(s),
+                            init=self._traversal_init(s, target)).copy_loc(s)
 
         if isinstance(s, ActivityTraversal):
-            if s.inline_constraints:
+            if s.inline_constraints and self._site(s) is None:
                 raise UnsupportedConstructError(
-                    "inline traversal constraints on %r are a later phase"
-                    % s.handle, loc=s.getLoc())
+                    "inline traversal constraints on %r need the action tree, "
+                    "and this action has none" % s.handle, loc=s.getLoc())
             written = None
             if s.type_qname is None:
                 # Hand-built IR: the handle's declared type, as written.
@@ -622,55 +719,60 @@ class PSSToScenarioPass:
             target = self._traversal_target(s, s.type_qname, written,
                                             what="handle %r" % s.handle)
             return ScInvoke(target=target, inst=s.handle,
-                            child_base=self._child_base(s)).copy_loc(s)
+                            inline_constraints=list(s.inline_constraints or []),
+                            child_base=self._child_base(s),
+                            site=self._site(s),
+                            init=self._traversal_init(s, target)).copy_loc(s)
 
         if isinstance(s, ActivityDoWhile):
             # `repeat {...} while (c);`: the body runs before the first test.
             return ScLoop(kind="dowhile", cond=s.condition,
-                          body=self._lower_stmts(s.body)).copy_loc(s)
+                          body=self._lower_stmts(s.body),
+                          scope=self._scope(s)).copy_loc(s)
 
         if isinstance(s, ActivityReplicate):
             # In a sequential scope, `replicate (N) S` is N copies of S in
             # sequence: a counted loop, while nothing names the per-iteration
             # instances. (In parallel/schedule it is refused below.)
             if s.label is not None:
-                # Each iteration runs its own nodes of the action tree, at
-                # its own base: a loop cannot, until P1.4 unrolls it.
-                self._layouts.get(self._cur_qname, loc=s.getLoc())  # O4 refusal
-                raise UnsupportedConstructError(
-                    "replicate with an iteration label (%s[]) is not supported "
-                    "yet (P1.4): each iteration runs its own instances"
-                    % s.label, loc=s.getLoc())
+                return self._unroll_replicate(s)
             return ScLoop(kind="repeat", count=s.count, index_var=s.index_var,
-                          body=self._lower_stmts(s.body)).copy_loc(s)
+                          body=self._lower_stmts(s.body),
+                          scope=self._scope(s)).copy_loc(s)
 
         if isinstance(s, ActivityRepeat):
             return ScLoop(kind="repeat", count=s.count, index_var=s.index_var,
-                          body=self._lower_stmts(s.body)).copy_loc(s)
+                          body=self._lower_stmts(s.body),
+                          scope=self._scope(s)).copy_loc(s)
 
         if isinstance(s, ActivityForeach):
             return ScLoop(kind="foreach", iter_var=s.iterator,
                           collection=s.collection, index_var=s.index_var,
-                          body=self._lower_stmts(s.body)).copy_loc(s)
+                          body=self._lower_stmts(s.body),
+                          scope=self._scope(s)).copy_loc(s)
 
         if isinstance(s, ActivityIfElse):
             return ScIf(cond=s.condition,
                         then_body=self._lower_stmts(s.if_body),
-                        else_body=self._lower_stmts(s.else_body)).copy_loc(s)
+                        else_body=self._lower_stmts(s.else_body),
+                        then_scope=self._scope(s, ("then",)),
+                        else_scope=self._scope(s, ("else",))).copy_loc(s)
 
         if isinstance(s, ActivityMatch):
             cases = [ScMatchCase(pattern=c.pattern,
-                                 body=self._lower_stmts(c.body))
+                                 body=self._lower_stmts(c.body),
+                                 scope=self._scope(c))
                      for c in s.cases]
             return ScMatch(subject=s.subject, cases=cases).copy_loc(s)
 
         if isinstance(s, ActivityAtomic):
-            return ScAtomic(body=self._lower_stmts(s.stmts)).copy_loc(s)
+            return ScAtomic(body=self._lower_stmts(s.stmts),
+                            scope=self._scope(s)).copy_loc(s)
 
         if isinstance(s, ActivityParallel):
             self._check_no_replicate_branches(s, "parallel")
             return ScPar(branches=self._lower_stmts(s.stmts),
-                         join_spec=s.join_spec).copy_loc(s)
+                         join_spec=s.join_spec, scope=self._scope(s)).copy_loc(s)
 
         if isinstance(s, ActivitySchedule):
             # With members that do not interact, running them all in
@@ -679,11 +781,12 @@ class PSSToScenarioPass:
             self._check_no_replicate_branches(s, "schedule")
             self._check_schedule_members(s)
             return ScPar(branches=self._lower_stmts(s.stmts),
-                         join_spec=s.join_spec).copy_loc(s)
+                         join_spec=s.join_spec, scope=self._scope(s)).copy_loc(s)
 
         if isinstance(s, ActivitySelect):
             branches = [ScSelectBranch(guard=b.guard, weight=b.weight,
-                                       body=self._lower_stmts(b.body))
+                                       body=self._lower_stmts(b.body),
+                                       scope=self._scope(b))
                         for b in s.branches]
             return ScSelect(branches=branches,
                             allow_none=getattr(s, "allow_none", False)).copy_loc(s)

@@ -44,9 +44,20 @@ from ...scenario import (
 from ..validate import UnsupportedConstructError
 from .constraints import (constraint_sites, expr_to_constraints,
                           stmt_to_constraints, type_constraints)
-from .layout import object_layout
+from .layout import object_layout, subst_names
 
 _LOOPS = (ActivityRepeat, ActivityForeach, ActivityDoWhile, ActivityWhileDo)
+
+
+def _runs_once(s) -> bool:
+    """Does loop *s* surely run its body: a do-while, or a positive constant
+    count?"""
+    if isinstance(s, ActivityDoWhile):
+        return True
+    count = getattr(s, "count", None)
+    return (isinstance(s, (ActivityRepeat, ActivityReplicate))
+            and isinstance(count, E.ExprConstant)
+            and isinstance(count.value, int) and count.value > 0)
 
 
 def _loc(n):
@@ -78,6 +89,8 @@ class _Site:
     key: Optional[str]        # the child it traverses; None: no single one
     scope: int                # local scope holding it
     names: Dict[str, str]     # handle name -> key, where the statement is
+    iters: Tuple[int, ...] = ()   # its labeled-replicate iteration(s)
+    consts: Dict[str, int] = dc.field(default_factory=dict)  # their index vars
 
 
 @dc.dataclass
@@ -85,6 +98,7 @@ class _Constraint:
     stmt: ActivityConstraint
     scope: int
     names: Dict[str, str]
+    consts: Dict[str, int] = dc.field(default_factory=dict)
 
 
 @dc.dataclass
@@ -103,20 +117,38 @@ class TypeLayout:
     scopes: List[Tuple[ScopeKind, Optional[int]]] = dc.field(default_factory=list)
     fields: Dict[str, str] = dc.field(default_factory=dict)  # handle field -> key
     size: int = 0
+    #: (id(block), part) -> local scope index, for the scenario pass to mark
+    #: the statements that open each block (``ScSeq.scope``, ...)
+    scope_of: Dict[Tuple[int, Any], int] = dc.field(default_factory=dict)
 
-    def site_keys(self, stmt) -> List[Optional[str]]:
-        return [s.key for s in self.sites if s.stmt is stmt]
+    def _site(self, stmt, iters=()) -> Optional[_Site]:
+        found = [s for s in self.sites if s.stmt is stmt and s.iters == tuple(iters)]
+        return found[0] if len(found) == 1 and found[0].key is not None else None
 
-    def child_base(self, stmt) -> Optional[int]:
-        """``ScInvoke.child_base`` of traversal *stmt*, or None if it has no
-        single node."""
-        keys = self.site_keys(stmt)
-        if len(keys) != 1 or keys[0] is None:
+    def child_base(self, stmt, iters=()) -> Optional[int]:
+        """``ScInvoke.child_base`` of traversal *stmt* (in labeled-replicate
+        iteration *iters*), or None if it has no single node."""
+        site = self._site(stmt, iters)
+        if site is None:
             return None
         for d in self.decls:
-            if d.key == keys[0]:
+            if d.key == site.key:
                 return d.rel_base
         return None
+
+    def site_index(self, stmt, iters=()) -> Optional[int]:
+        """``ScInvoke.site``: the traversal's index among the sites that have
+        a node, in walk order -- the order ``TreeBuilder`` numbers them."""
+        site = self._site(stmt, iters)
+        if site is None:
+            return None
+        keyed = [s for s in self.sites if s.key is not None]
+        return next(i for i, s in enumerate(keyed) if s is site)
+
+    def scope(self, block, part=()) -> Optional[int]:
+        """The local scope *block* (with *part*: ``"then"``/``"else"``, a
+        replicate iteration) opens."""
+        return self.scope_of.get((id(block), part))
 
 
 class Layouts:
@@ -155,6 +187,17 @@ class Layouts:
             return None
 
     # -- building -----------------------------------------------------------
+
+    def subtree(self, qname: str) -> List[Tuple[str, int, Any]]:
+        """Every slot of *qname*'s subtree: ``(path name, slot relative to
+        its base, layout.Leaf)``. The type's own leaves, then each child's
+        subtree under its key (``b1.x``, ``#0.s.f``)."""
+        lay = self.get(qname)
+        out = [(leaf.name, i, leaf) for i, leaf in enumerate(lay.own)]
+        for d in lay.decls:
+            for name, slot, leaf in self.subtree(d.type_qname):
+                out.append(("%s.%s" % (d.key, name), d.rel_base + slot, leaf))
+        return out
 
     def handle_type(self, f) -> Optional[str]:
         """The action type of handle field *f*, or None if it is not one."""
@@ -206,9 +249,12 @@ class _Walker:
         self.lay = lay
         self.anon: Dict[str, int] = {}
 
-    def _scope(self, kind: ScopeKind, parent: int) -> int:
+    def _scope(self, kind: ScopeKind, parent: int, block=None, part=None) -> int:
         self.lay.scopes.append((kind, parent))
-        return len(self.lay.scopes) - 1
+        idx = len(self.lay.scopes) - 1
+        if block is not None:
+            self.lay.scope_of[(id(block), part)] = idx
+        return idx
 
     def _key(self, want: str) -> str:
         taken = {d.key for d in self.lay.decls}
@@ -224,12 +270,13 @@ class _Walker:
             out.update(scope)
         return out
 
-    def walk(self, stmts, prefix: str, chain, scope: int) -> None:
+    def walk(self, stmts, prefix: str, chain, scope: int, iters=(), consts=None) -> None:
         chain = chain + [{}]
         for s in stmts or []:
-            self.stmt(s, prefix, chain, scope)
+            self.stmt(s, prefix, chain, scope, iters, consts or {})
 
-    def stmt(self, s, prefix, chain, scope) -> None:
+    def stmt(self, s, prefix, chain, scope, iters=(), consts=None) -> None:
+        consts = consts or {}
         lay = self.lay
         if isinstance(s, ActivityFieldDecl):
             if s.type_qname is not None:
@@ -250,7 +297,8 @@ class _Walker:
                 self.anon[prefix] = n + 1
                 key = self._key("%s#%d" % (prefix, n))
             lay.decls.append(_Decl(key, tq, scope=scope))
-            lay.sites.append(_Site(s, key, scope, self._names(chain)))
+            lay.sites.append(_Site(s, key, scope, self._names(chain), tuple(iters),
+                                   dict(consts)))
             return
         if isinstance(s, ActivityTraversal):
             base = self._names(chain).get(s.handle)
@@ -260,10 +308,11 @@ class _Walker:
                 key = ("%s[%d]" % (base, idx.value)
                        if isinstance(idx, E.ExprConstant) and isinstance(idx.value, int)
                        else None)
-            lay.sites.append(_Site(s, key, scope, self._names(chain)))
+            lay.sites.append(_Site(s, key, scope, self._names(chain), tuple(iters),
+                                   dict(consts)))
             return
         if isinstance(s, ActivityConstraint):
-            lay.constraints.append(_Constraint(s, scope, self._names(chain)))
+            lay.constraints.append(_Constraint(s, scope, self._names(chain), dict(consts)))
             return
         if isinstance(s, ActivityReplicate) and s.label is not None:
             count = s.count
@@ -273,32 +322,41 @@ class _Walker:
                     "count: each iteration's actions are nodes of the action "
                     "tree" % s.label, loc=_loc(s))
             for i in range(count.value):
-                sub = self._scope(ScopeKind.REPLICATE_ITER, scope)
-                self.walk(s.body, "%s%s[%d]." % (prefix, s.label, i), chain, sub)
+                it = tuple(iters) + (i,)
+                sub = self._scope(ScopeKind.REPLICATE_ITER, scope, s, it)
+                ic = dict(consts, **({s.index_var: i} if s.index_var else {}))
+                self.walk(s.body, "%s%s[%d]." % (prefix, s.label, i), chain, sub, it, ic)
             return
         if isinstance(s, ActivityReplicate) or isinstance(s, _LOOPS):
-            self.walk(s.body, prefix, chain, self._scope(ScopeKind.LOOP_BODY, scope))
+            kind = (ScopeKind.LOOP_BODY_CERTAIN if _runs_once(s)
+                    else ScopeKind.LOOP_BODY)
+            self.walk(s.body, prefix, chain, self._scope(kind, scope, s, iters), iters, consts)
             return
         kinds = {ActivitySequenceBlock: ScopeKind.SEQUENCE,
                  ActivityParallel: ScopeKind.PARALLEL,
                  ActivitySchedule: ScopeKind.SCHEDULE,
                  ActivityAtomic: ScopeKind.ATOMIC}
         if type(s) in kinds:
-            self.walk(s.stmts, prefix, chain, self._scope(kinds[type(s)], scope))
+            self.walk(s.stmts, prefix, chain,
+                      self._scope(kinds[type(s)], scope, s, iters), iters, consts)
             return
         if isinstance(s, ActivitySelect):
             for br in s.branches:
                 self.walk(br.body, prefix, chain,
-                          self._scope(ScopeKind.SELECT_BRANCH, scope))
+                          self._scope(ScopeKind.SELECT_BRANCH, scope, br, iters), iters, consts)
             return
         if isinstance(s, ActivityIfElse):
-            self.walk(s.if_body, prefix, chain, self._scope(ScopeKind.IF_THEN, scope))
-            self.walk(s.else_body, prefix, chain, self._scope(ScopeKind.IF_ELSE, scope))
+            self.walk(s.if_body, prefix, chain,
+                      self._scope(ScopeKind.IF_THEN, scope, s, ("then",) + tuple(iters)),
+                      iters, consts)
+            self.walk(s.else_body, prefix, chain,
+                      self._scope(ScopeKind.IF_ELSE, scope, s, ("else",) + tuple(iters)),
+                      iters, consts)
             return
         if isinstance(s, ActivityMatch):
             for case in s.cases:
                 self.walk(case.body, prefix, chain,
-                          self._scope(ScopeKind.MATCH_CASE, scope))
+                          self._scope(ScopeKind.MATCH_CASE, scope, case, iters), iters, consts)
             return
         # Anything else holds no action and no constraint the tree needs; the
         # scenario pass lowers or refuses it.
@@ -467,16 +525,16 @@ class TreeBuilder:
             for ac in lay.constraints:
                 r = self._resolver(node.id, ac.names)
                 for e in ac.stmt.constraints:
-                    add(expr_to_constraints(e, r), ScopeConstraintKind.ACTIVITY,
-                        node.id, scope=sbase + ac.scope)
+                    add(expr_to_constraints(subst_names(e, ac.consts), r),
+                        ScopeConstraintKind.ACTIVITY, node.id, scope=sbase + ac.scope)
         for site in tree.sites:
             stmt = self._site_src[site.id]
             if not getattr(stmt.stmt, "inline_constraints", None):
                 continue
             r = self._resolver(site.owner, stmt.names, target=site.target)
             for e in stmt.stmt.inline_constraints:
-                add(expr_to_constraints(e, r), ScopeConstraintKind.WITH,
-                    site.owner, site=site.id)
+                add(expr_to_constraints(subst_names(e, stmt.consts), r),
+                    ScopeConstraintKind.WITH, site.owner, site=site.id)
         return out
 
     def _cones(self) -> None:

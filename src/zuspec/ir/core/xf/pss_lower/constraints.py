@@ -39,7 +39,8 @@ from .layout import (is_struct, object_layout, resolve, struct_fields,
 
 
 def collect_solve_problem(coro: ScCoroutine, dt: DataTypeClass,
-                          types: Optional[Dict[str, object]] = None
+                          types: Optional[Dict[str, object]] = None,
+                          handles: Optional[set] = None
                           ) -> Optional[ScSolveProblem]:
     """Build a :class:`ScSolveProblem` for *coro* from action *dt*.
 
@@ -50,6 +51,11 @@ def collect_solve_problem(coro: ScCoroutine, dt: DataTypeClass,
     struct attribute is one variable per rand leaf, and the constraints its
     struct type declares are in force on it, with ``self`` meaning the
     attribute (``self.f`` in ``struct S`` is ``self.s.f`` on the action).
+
+    *handles* names the action's sub-action handle fields. A constraint
+    that reads through one (``a.val < b.val``) ties nodes of the action
+    tree: it belongs to the tree's cone (``action_tree``), which solves it
+    with lookahead, so it is left out here.
     """
     leaves = object_layout(dt.fields, types)
     rand_leaves = [(i, leaf) for i, leaf in enumerate(leaves) if leaf.rand]
@@ -69,7 +75,8 @@ def collect_solve_problem(coro: ScCoroutine, dt: DataTypeClass,
                 % (where, kind, getattr(fn, "name", "?")),
                 loc=getattr(fn, "loc", None))
         for st in getattr(fn, "body", []) or []:
-            constraints.extend(stmt_to_constraints(st, resolve, fn, prefix))
+            constraints.extend(c for c in stmt_to_constraints(st, resolve, fn, prefix)
+                               if not (handles and reads_handle(c, handles)))
 
     if not rand_leaves and not constraints:
         return None
@@ -232,6 +239,27 @@ def _is_implies_call(e) -> bool:
 # --------------------------------------------------------------------------- #
 # Field-reference resolution: name-based ref -> ExprRefField(index=slot)
 # --------------------------------------------------------------------------- #
+
+def reads_handle(c, handles) -> bool:
+    """Does constraint *c* read through one of the action handles *handles*
+    (``self.b1.x``, ``self.bs[1].x``)?"""
+    found = []
+
+    def walk(x):
+        if found:
+            return
+        rp = ref_path(x) if isinstance(x, (E.ExprAttribute, E.ExprSubscript)) else None
+        if rp is not None and rp[0] == "self" and rp[1][0].partition("[")[0] in handles:
+            found.append(x)
+            return
+        if dc.is_dataclass(x) and not isinstance(x, type):
+            for f in dc.fields(x):
+                v = getattr(x, f.name)
+                for y in (v if isinstance(v, list) else [v]):
+                    walk(y)
+    walk(c)
+    return bool(found)
+
 
 def ref_path(e):
     """``(root, path)`` of a reference, else None.

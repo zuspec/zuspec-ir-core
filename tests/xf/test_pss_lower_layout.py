@@ -79,3 +79,13 @@ def test_prefix_self_roots_a_struct_expression_at_its_attribute():
     e = layout.prefix_self(E.ExprBin(lhs=_self("a"), op=E.BinOp.Add,
                                      rhs=E.ExprConstant(value=1)), ("s", "csr"))
     assert e.lhs == _self("s", "csr", "a")
+
+
+def test_subst_names_fixes_a_replicate_index():
+    """An unrolled `replicate (j: N) R[]` iteration: `self.j` (the front end's
+    spelling of the index) and a local `j` become the iteration's constant."""
+    e = E.ExprBin(lhs=_self("j"), op=E.BinOp.Add, rhs=E.ExprRefLocal(name="j"))
+    got = layout.subst_names([S.StmtExpr(expr=e)], {"j": 2})
+    assert got[0].expr.lhs == E.ExprConstant(value=2)
+    assert got[0].expr.rhs == E.ExprConstant(value=2)
+    assert layout.subst_names(e, {"k": 1}) is e      # nothing to replace

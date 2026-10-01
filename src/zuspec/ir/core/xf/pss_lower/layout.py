@@ -18,7 +18,7 @@ import dataclasses as dc
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from ... import expr as E
-from ...data_type import DataTypeClass, DataTypeRef, DataTypeStruct
+from ...data_type import DataType, DataTypeClass, DataTypeRef, DataTypeStruct
 from ..validate import UnsupportedConstructError
 
 
@@ -171,7 +171,39 @@ def prefix_self(e: Any, prefix: Tuple[str, ...]) -> Any:
     return e
 
 
+def subst_names(x: Any, consts: Dict[str, int]) -> Any:
+    """*x* (an expression, statement, or list of them) with each name in
+    *consts* replaced by its value: an iteration of a labeled ``replicate``
+    with its index variable (``self.j``, as the front end spells it) fixed."""
+    if not consts:
+        return x
+    name = None
+    if isinstance(x, E.ExprAttribute) and isinstance(x.value, E.TypeExprRefSelf):
+        name = x.attr
+    elif isinstance(x, (E.ExprRefLocal, E.ExprRefUnresolved)):
+        name = x.name
+    if name is not None and name in consts:
+        return E.ExprConstant(value=consts[name])
+    if isinstance(x, (list, tuple)):
+        new = [subst_names(y, consts) for y in x]
+        if all(a is b for a, b in zip(new, x)):
+            return x
+        return type(x)(new) if isinstance(x, tuple) else new
+    if dc.is_dataclass(x) and not isinstance(x, (type, DataType)):
+        repl = {}
+        for f in dc.fields(x):
+            if not f.init:
+                continue
+            val = getattr(x, f.name)
+            new = subst_names(val, consts)
+            if new is not val:
+                repl[f.name] = new
+        return dc.replace(x, **repl) if repl else x
+    return x
+
+
 __all__ = [
+    "subst_names",
     "prefix_self",
     "Leaf", "resolve", "is_struct", "struct_chain", "struct_fields",
     "struct_functions", "value_leaves", "field_leaves", "object_layout",

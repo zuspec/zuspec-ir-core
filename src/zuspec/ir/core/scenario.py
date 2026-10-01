@@ -95,6 +95,19 @@ class ScCoroutine(Base):
             ``pss_lower.layout``). Exec code names an attribute as
             ``self.<name>``; this is what resolves that name to a slot and a
             type.  Empty for synthetic coroutines.
+        subtree:
+            The layout of the action's whole subtree (P1-D1): its own
+            ``fields``, then each child node's slots named by its path
+            (``b1.x``, ``bs[1].s.f``, ``#0.val``), slots relative to the
+            action's base. A traversed child's attributes are read through
+            it (``self.b1.x`` after ``b1;``). Empty without an action tree.
+
+    Activity statements carry the local index of the activity block they
+    open (``scope``, ``then_scope``/``else_scope``): an index into the
+    action type's scopes, so ``ScActionTree.scopes`` is the node's scope
+    base plus it. Entering a block resets the handles traversed in it
+    (13.4.8) and, for a branch or loop body, commits its structure (P1-D2).
+    ``None`` without an action tree.
     """
     name: str = dc.field()
     body: List[ScStmt] = dc.field(default_factory=list)
@@ -103,6 +116,7 @@ class ScCoroutine(Base):
     action_type: Optional[str] = dc.field(default=None)
     pending_constraints: List['Function'] = dc.field(default_factory=list)
     fields: List['ScField'] = dc.field(default_factory=list)
+    subtree: List['ScField'] = dc.field(default_factory=list)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScCoroutine(self)
@@ -154,6 +168,7 @@ class ScExecBlock(ScStmt):
 class ScSeq(ScStmt):
     """Ordered region — execute ``body`` statements in sequence."""
     body: List[ScStmt] = dc.field(default_factory=list)
+    scope: Optional[int] = dc.field(default=None)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScSeq(self)
@@ -165,6 +180,7 @@ class ScPar(ScStmt):
     (ALL / FIRST(n) / NONE / SELECT)."""
     branches: List[ScStmt] = dc.field(default_factory=list)
     join_spec: Optional['JoinSpec'] = dc.field(default=None)
+    scope: Optional[int] = dc.field(default=None)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScPar(self)
@@ -176,6 +192,7 @@ class ScSelectBranch(Base):
     guard: Optional['Expr'] = dc.field(default=None)
     weight: Optional['Expr'] = dc.field(default=None)
     body: List[ScStmt] = dc.field(default_factory=list)
+    scope: Optional[int] = dc.field(default=None)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScSelectBranch(self)
@@ -205,6 +222,7 @@ class ScLoop(ScStmt):
     iter_var: Optional[str] = dc.field(default=None)
     collection: Optional['Expr'] = dc.field(default=None)
     body: List[ScStmt] = dc.field(default_factory=list)
+    scope: Optional[int] = dc.field(default=None)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScLoop(self)
@@ -215,6 +233,7 @@ class ScAtomic(ScStmt):
     """No scheduler yields inside — ``body`` runs to completion without
     suspending."""
     body: List[ScStmt] = dc.field(default_factory=list)
+    scope: Optional[int] = dc.field(default=None)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScAtomic(self)
@@ -226,6 +245,8 @@ class ScIf(ScStmt):
     cond: 'Expr' = dc.field()
     then_body: List[ScStmt] = dc.field(default_factory=list)
     else_body: List[ScStmt] = dc.field(default_factory=list)
+    then_scope: Optional[int] = dc.field(default=None)
+    else_scope: Optional[int] = dc.field(default=None)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScIf(self)
@@ -236,6 +257,7 @@ class ScMatchCase(Base):
     """One case of a :class:`ScMatch` (``pattern is None`` → default)."""
     pattern: Optional['Expr'] = dc.field(default=None)
     body: List[ScStmt] = dc.field(default_factory=list)
+    scope: Optional[int] = dc.field(default=None)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScMatchCase(self)
@@ -271,11 +293,25 @@ class ScInvoke(ScStmt):
             (:class:`ScActionTree`). ``None`` when the site has no single
             node (a handle-array element with a computed index, an iteration
             of a labeled ``replicate``).
+        site:
+            The traversal's index among the invoking type's traversal sites
+            (those with a node), in walk order: the node's first site in
+            ``ScActionTree.sites`` plus it is this traversal there. ``None``
+            when ``child_base`` is.
+        init:
+            A traversal with initializers (LRM 11.3.1 b i-ii): the traversed
+            action's attribute initial values, then its handle declaration's
+            initializers, then the traversal's -- assignments rooted at the
+            child (``self.b1.x``) that the INVOKING action runs, on the
+            child's slots, before the child starts. The child then skips its
+            own initial values. Empty for a traversal with no initializers.
     """
     target: str = dc.field()
     inst: Optional[str] = dc.field(default=None)
     inline_constraints: List['Expr'] = dc.field(default_factory=list)
     child_base: Optional[int] = dc.field(default=None)
+    site: Optional[int] = dc.field(default=None)
+    init: List['Stmt'] = dc.field(default_factory=list)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScInvoke(self)
@@ -459,12 +495,16 @@ class ScopeKind(enum.Enum):
     IF_THEN       = "if_then"
     IF_ELSE       = "if_else"
     MATCH_CASE    = "match_case"
-    LOOP_BODY     = "loop_body"      # repeat / foreach / do-while / replicate
+    LOOP_BODY     = "loop_body"      # repeat / foreach / while / replicate
+    LOOP_BODY_CERTAIN = "loop_body_certain"  # a body that surely runs: a
+                                             # positive constant count, do-while
     REPLICATE_ITER = "replicate_iter"  # one iteration of a labeled replicate
 
 
 #: Entering a scope of one of these kinds commits the structure of the nodes
-#: it holds (design §5.4); the others commit with their enclosing scope.
+#: it holds (design §5.4); the others commit with their enclosing scope. A loop
+#: body that surely runs commits with its loop: its first iteration's
+#: traversals are lookahead for what precedes the loop (LRM Ex 180).
 COMMITTING_SCOPES = frozenset({
     ScopeKind.SELECT_BRANCH, ScopeKind.IF_THEN, ScopeKind.IF_ELSE,
     ScopeKind.MATCH_CASE, ScopeKind.LOOP_BODY})
