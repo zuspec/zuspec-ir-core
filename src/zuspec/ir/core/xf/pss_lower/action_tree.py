@@ -305,6 +305,9 @@ class _Walker:
                 return                          # the pass refuses it
             if s.label is not None:
                 key = self._key(prefix + s.label)
+                # `l1: do A;` names its action `l1` in the block (11.8):
+                # `l1.val` in a constraint or a `with` after it is that node.
+                chain[-1][s.label] = key
             else:
                 n = self.anon.get(prefix, 0)
                 self.anon[prefix] = n + 1
