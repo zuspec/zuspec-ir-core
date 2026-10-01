@@ -18,9 +18,10 @@ pass does two things a solver backend needs:
   is the field's index in the full field list — the form the solver lowering
   (``build_solve_blob``) addresses variables by.
 
-``foreach`` (needs array flattening) and ``soft``/``dist``/``solve...before`` (not
-yet surfaced cleanly by the parser) are deferred and reported, not silently
-dropped.
+``foreach`` (needs array flattening) and ``solve...before`` are deferred and
+reported, not silently dropped. ``soft``/``dist``/``default`` have no IR form
+yet: the front end records them on their block (``metadata["untranslated"]``)
+and ``collect_solve_problem`` refuses such a block.
 """
 from __future__ import annotations
 
@@ -52,6 +53,14 @@ def collect_solve_problem(coro: ScCoroutine,
 
     constraints: List[C.Constraint] = []
     for fn in coro.pending_constraints:
+        # A statement the front end could not translate (`soft`, `dist`,
+        # `default`) is recorded on its block rather than dropped. Solving the
+        # block without it would be a weaker problem than the one written.
+        for kind, where in (getattr(fn, "metadata", None) or {}).get("untranslated", ()):
+            raise UnsupportedConstructError(
+                "%s'%s' constraint in %r is not supported yet"
+                % (where, kind, getattr(fn, "name", "?")),
+                loc=getattr(fn, "loc", None))
         for st in getattr(fn, "body", []) or []:
             constraints.extend(_stmt_to_constraints(st, slots, fn))
 

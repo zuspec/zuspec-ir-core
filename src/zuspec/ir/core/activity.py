@@ -163,11 +163,18 @@ class ActivityTraversal(ActivityStmt):
                             None when the producer resolved nothing (IR
                             built by hand or from Python); a consumer then
                             resolves ``handle`` itself.
+        comp_expr:          The component instance a ``with { comp == X; }``
+                            steers the traversal to (LRM 13.4.5, Ex 143),
+                            taken out of ``inline_constraints``. None when
+                            the traversal does not constrain ``comp``. A
+                            consumer that cannot place an action in a chosen
+                            instance must refuse it, never ignore it.
     """
     handle: str = dc.field()
     index: Optional['Expr'] = dc.field(default=None)
     inline_constraints: List['Expr'] = dc.field(default_factory=list)
     type_qname: Optional[str] = dc.field(default=None)
+    comp_expr: Optional['Expr'] = dc.field(default=None)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitActivityTraversal(self)
@@ -189,13 +196,14 @@ class ActivityAnonTraversal(ActivityStmt):
                             resolved it, qualified (``do B`` in ``pss_top``
                             -> ``"pss_top::B"``); ``action_type`` stays as
                             written. None when the producer resolved nothing.
+        comp_expr:          As on ``ActivityTraversal``: the instance a
+                            ``do T with { comp == X; }`` steers to.
     """
     action_type: str = dc.field()
     type_qname: Optional[str] = dc.field(default=None)
     label: Optional[str] = dc.field(default=None)
     inline_constraints: List['Expr'] = dc.field(default_factory=list)
     action_type_cls: Optional[type] = dc.field(default=None)
-    # WI-6: optional component-override expression from ``do T with comp == expr;``
     comp_expr: Optional['Expr'] = dc.field(default=None)
     init_bindings: List[Tuple[str, str, str]] = dc.field(default_factory=list)
     # Each tuple: (target_field_name, src_label, src_attr)

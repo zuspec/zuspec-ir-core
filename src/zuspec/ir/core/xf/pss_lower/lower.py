@@ -512,9 +512,35 @@ class PSSToScenarioPass:
     def _lower_stmts(self, stmts) -> List:
         return [self._lower_activity_stmt(s) for s in stmts]
 
+    @staticmethod
+    def _refuse_unlowered_traversal_parts(s):
+        """Refuse what a traversal carries and this pass does not lower yet.
+
+        Each of these used to be ignored, and the traversal ran as though
+        it had not been written: ``h[i]`` ran the element TYPE with no
+        element, ``comp == X`` ran the action in whatever instance, and
+        Python-front-end flow bindings were not bound.
+        """
+        if getattr(s, "index", None) is not None:
+            raise UnsupportedConstructError(
+                "traversal of an element of the handle array %r is not "
+                "supported yet (P1.2)" % s.handle, loc=s.getLoc())
+        if getattr(s, "comp_expr", None) is not None:
+            raise UnsupportedConstructError(
+                "a traversal constrained with `comp == ...` is not supported "
+                "yet (P1.5)", loc=s.getLoc())
+        if getattr(s, "init_bindings", None):
+            raise UnsupportedConstructError(
+                "flow bindings on a traversal (%s) are not lowered by this "
+                "pass" % ", ".join(b[0] for b in s.init_bindings),
+                loc=s.getLoc())
+
     def _lower_activity_stmt(self, s):
         if isinstance(s, ActivitySequenceBlock):
             return ScSeq(body=self._lower_stmts(s.stmts)).copy_loc(s)
+
+        if isinstance(s, (ActivityAnonTraversal, ActivityTraversal)):
+            self._refuse_unlowered_traversal_parts(s)
 
         if isinstance(s, ActivityAnonTraversal):
             if s.inline_constraints:
