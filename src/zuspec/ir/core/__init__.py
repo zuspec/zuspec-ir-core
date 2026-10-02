@@ -17,7 +17,7 @@ def profile(modname, super=None):
     ProfileRgy.register_profile(modname, super)
 
 
-from .base import Base, BaseP
+from .base import Base, BaseP, Loc
 from .context import Context
 from .visitor import Visitor
 from .json_converter import JsonConverter
@@ -98,7 +98,7 @@ from .expr_phase2 import (
 from .stmt import (
     Stmt, StmtExpr, StmtAssign, StmtAnnAssign, StmtAugAssign, StmtReturn, StmtIf, StmtFor,
     StmtWhile, StmtBreak, StmtContinue, StmtPass, StmtRaise, StmtAssert, Alias, Arg, Arguments,
-    StmtAssume, StmtCover, StmtUnique,
+    StmtAssume, StmtCover, StmtUnique, StmtDefault, StmtDefaultDisable,
     WithItem, StmtWith, StmtExceptHandler, StmtTry, TypeIgnore, Module,
     StmtMatch, StmtMatchCase, Pattern, PatternValue, PatternAs, PatternOr, PatternSequence,
     # PSS-specific statements
@@ -171,7 +171,7 @@ from .abstraction_field_ir import AbstractionFieldIR
 from .registry import LoweringRegistry, global_registry
 
 __all__ = [
-    "profile","Base","BaseP","Visitor","JsonConverter","json_converter",
+    "profile","Base","BaseP","Loc","Visitor","JsonConverter","json_converter",
     "Bind","BindSet","Field","FieldInOut","FieldKind","SignalDirection",
     "RandKind","FieldMetaKind","ClaimMode","Pool","PoolBind",
     "DataType","DataTypeInt","DataTypeUptr","DataTypeStruct","DataTypeClass","DataTypeAction","DataTypeComponent","DataTypeExtern",
@@ -204,7 +204,7 @@ __all__ = [
     # zdc built-in typed IR nodes
     "ExprSext","ExprZext","ExprCbit","ExprSigned","ExprNew",
     "Stmt","StmtExpr","StmtAssign","StmtAnnAssign","StmtAugAssign","StmtReturn","StmtIf","StmtFor","StmtWhile",
-    "StmtBreak","StmtContinue","StmtPass","StmtRaise","StmtAssert","StmtAssume","StmtCover","StmtUnique","Alias","Arg","Arguments",
+    "StmtBreak","StmtContinue","StmtPass","StmtRaise","StmtAssert","StmtAssume","StmtCover","StmtUnique","StmtDefault","StmtDefaultDisable","Alias","Arg","Arguments",
     # PSS-specific statements
     "StmtRepeat","StmtRepeatWhile","StmtForeach","StmtYield","StmtSuper","StmtRandomize",
     # Interface-protocol statements

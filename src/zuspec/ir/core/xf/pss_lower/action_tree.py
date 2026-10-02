@@ -50,11 +50,12 @@ from ...scenario import (
     ScActionNode, ScActionTree, ScActivityScope, ScScopeConstraint,
     ScScopeProblem, ScScopeVar, ScTraversalSite, ScopeConstraintKind, ScopeKind,
 )
-from ...constraint import ConstraintExpr
+from ...constraint import ConstraintExpr, ConstraintImplies
 from ..validate import UnsupportedConstructError
-from .constraints import (constraint_sites, expr_to_constraints,
-                          stmt_to_constraints, type_constraints)
-from .layout import object_layout, subst_names
+from . import defaults as D
+from .constraints import (constraint_sites, default_path, expr_to_constraints,
+                          resolve_refs, stmt_to_constraints, type_constraints)
+from .layout import domain_expr, leaf_domain, object_layout, subst_names
 
 _LOOPS = (ActivityRepeat, ActivityForeach, ActivityDoWhile, ActivityWhileDo)
 
@@ -101,6 +102,7 @@ class _Site:
     names: Dict[str, str]     # handle name -> key, where the statement is
     iters: Tuple[int, ...] = ()   # its labeled-replicate iteration(s)
     consts: Dict[str, int] = dc.field(default_factory=dict)  # their index vars
+    indices: Tuple[str, ...] = ()  # the index variables of the loops around it
 
 
 @dc.dataclass
@@ -261,6 +263,8 @@ class _Walker:
         self.layouts = layouts
         self.lay = lay
         self.anon: Dict[str, int] = {}
+        #: the index variables of the (unrolled-at-run-time) loops being walked
+        self.loop_vars: List[str] = []
 
     def _scope(self, kind: ScopeKind, parent: int, block=None, part=None) -> int:
         self.lay.scopes.append((kind, parent))
@@ -314,7 +318,7 @@ class _Walker:
                 key = self._key("%s#%d" % (prefix, n))
             lay.decls.append(_Decl(key, tq, scope=scope))
             lay.sites.append(_Site(s, key, scope, self._names(chain), tuple(iters),
-                                   dict(consts)))
+                                   dict(consts), tuple(self.loop_vars)))
             return
         if isinstance(s, ActivityTraversal):
             base = self._names(chain).get(s.handle)
@@ -334,7 +338,7 @@ class _Walker:
                     "with an inline constraint; traverse it in a block of its "
                     "own (13.4.8)" % s.handle, loc=_loc(s))
             lay.sites.append(_Site(s, key, scope, self._names(chain), tuple(iters),
-                                   dict(consts)))
+                                   dict(consts), tuple(self.loop_vars)))
             return
         if isinstance(s, ActivityConstraint):
             lay.constraints.append(_Constraint(s, scope, self._names(chain), dict(consts)))
@@ -355,7 +359,13 @@ class _Walker:
         if isinstance(s, ActivityReplicate) or isinstance(s, _LOOPS):
             kind = (ScopeKind.LOOP_BODY_CERTAIN if _runs_once(s)
                     else ScopeKind.LOOP_BODY)
-            self.walk(s.body, prefix, chain, self._scope(kind, scope, s, iters), iters, consts)
+            iv = getattr(s, "index_var", None)
+            self.loop_vars.append(iv)
+            try:
+                self.walk(s.body, prefix, chain, self._scope(kind, scope, s, iters),
+                          iters, consts)
+            finally:
+                self.loop_vars.pop()
             return
         kinds = {ActivitySequenceBlock: ScopeKind.SEQUENCE,
                  ActivityParallel: ScopeKind.PARALLEL,
@@ -434,6 +444,16 @@ class TreeBuilder:
         self.tree.size = lay.size
         # A node choosing among instances holds its choice in a slot of its own.
         self._aux: Dict[int, int] = {}
+        #: nodes solved in a cone even with nothing tying them to another
+        self._needs_cone: set = set()
+        #: (node, key) -> the slot past the subtrees holding a value its
+        #: constraints read: ``comp.<path>`` (key: the path), or a loop's
+        #: index (key: ``"$" + name``)
+        self._aux_reads: Dict[Tuple[int, Any], int] = {}
+        #: node -> the variables those reads add to its cone
+        self._aux_vars: Dict[int, List[ScScopeVar]] = {}
+        #: (node, constraint) tying a read to the node's choice of instance
+        self._comp_ties: List[Tuple[int, Any]] = []
         for n in self.tree.nodes:
             if len(n.comp) > 1:
                 n.comp_slot = self.tree.size
@@ -499,18 +519,45 @@ class TreeBuilder:
 
     # -- resolution ---------------------------------------------------------
 
-    def _resolver(self, nid: int, names: Dict[str, str], target: Optional[int] = None):
-        def resolve(root, path):
+    def _resolver(self, nid: int, names: Dict[str, str], target: Optional[int] = None,
+                  indices: Tuple[str, ...] = ()):
+        def where(root):
             if root == "traversed":
-                if target is None:
-                    return None
-                lay = self._lay[target]
-                return self._lookup(target, path, dict(lay.fields))
-            return self._lookup(nid, path, names)
+                return (target, dict(self._lay[target].fields)) if target is not None \
+                    else (None, None)
+            return nid, names
+
+        def resolve(root, path):
+            # A loop's index variable shadows an attribute of the same name.
+            if (root == "self" and len(path) == 1 and path[0] in indices
+                    and target is not None):
+                return self._loop_var(target, nid, path[0])
+            n, nm = where(root)
+            return None if n is None else self._lookup(n, path, nm)
+
+        def leaves(root, path):
+            # The scalars of a struct attribute (not of a child action: its
+            # own layout's leaves, wherever the path leads).
+            n, nm = where(root)
+            if n is None:
+                return None
+            found = self._leaves_under(n, path, nm)
+            owners = {self._owner_of(s) for _, s, _ in found}
+            if len(owners) != 1 or any(not name for name, _, _ in found):
+                return None
+            owner = owners.pop()
+            lay = self._lay[owner]
+            base = self.tree.nodes[owner].base
+            if any(lay.own[s - base].name.count(".") == 0 for _, s, _ in found):
+                return None                     # a child action, not a struct
+            return [(name, s) for name, s, _ in found]
+        resolve.leaves = leaves
         return resolve
 
     def _lookup(self, nid: int, path, names: Dict[str, str]) -> Optional[int]:
         """The absolute slot *path* names from node *nid*, or None."""
+        if len(path) > 1 and path[0] == "comp":
+            return self._comp_attr(nid, tuple(path[1:]))
         node = self.tree.nodes[nid]
         lay = self._lay[nid]
         name = ".".join(path)
@@ -527,6 +574,45 @@ class TreeBuilder:
         if child is None:
             return None
         return self._lookup(child, path[1:], dict(self._lay[child].fields))
+
+    def _leaves_under(self, nid: int, path, names: Dict[str, str]) -> list:
+        """``[(name, slot, layout.Leaf)]``: the scalar *path* names from node
+        *nid*, or each scalar under it if it names an aggregate (a struct
+        attribute, or a child action). *name* is relative to *path*: ``""``
+        for the scalar itself, ``"f"`` for ``path.f``."""
+        node = self.tree.nodes[nid]
+        lay = self._lay[nid]
+        name = ".".join(path)
+        own = [("" if lf.name == name else lf.name[len(name) + 1:], node.base + i, lf)
+               for i, lf in enumerate(lay.own)
+               if lf.name == name or lf.name.startswith(name + ".")]
+        if own:
+            return own
+        base, br, idx = path[0].partition("[")
+        key = names.get(base)
+        child = self._child.get((nid, key + br + idx)) if key is not None else None
+        if child is None:
+            return []
+        if len(path) > 1:
+            return self._leaves_under(child, path[1:], dict(self._lay[child].fields))
+        return self._subtree_leaves(child)
+
+    def _subtree_leaves(self, nid: int) -> list:
+        """``[(name, slot, layout.Leaf)]`` of node *nid* and its children."""
+        base = self.tree.nodes[nid].base
+        lay = self._lay[nid]
+        out = [(lf.name, base + i, lf) for i, lf in enumerate(lay.own)]
+        for d in lay.decls:
+            out.extend(("%s.%s" % (d.key, n), s, lf) for n, s, lf in
+                       self._subtree_leaves(self._child[(nid, d.key)]))
+        return out
+
+    def _depth(self, nid: int) -> int:
+        d = 0
+        while self.tree.nodes[nid].parent is not None:
+            nid = self.tree.nodes[nid].parent
+            d += 1
+        return d
 
     def _owner_of(self, slot: int) -> Optional[int]:
         if slot in self._aux:
@@ -556,6 +642,90 @@ class TreeBuilder:
         return out
 
     # -- components -----------------------------------------------------------
+
+    def _instances(self, nid: int) -> List[int]:
+        """Every component instance node *nid* may run in, by id."""
+        node = self.tree.nodes[nid]
+        parents = self._instances(node.parent) if node.parent is not None else [0]
+        return sorted({p + c for p in parents for c in node.comp})
+
+    def _loop_var(self, target: int, owner: int, name: str) -> int:
+        """The slot of loop index *name*, read by a ``with`` of a traversal
+        of *target* in *owner*'s activity (G6): a variable of *target*,
+        pinned when it is solved to the loop's counter in *owner*'s frame."""
+        key = (target, "$" + name)
+        if key not in self._aux_reads:
+            node = self.tree.nodes[target]
+            slot = self._new_aux(target)
+            self._aux_vars.setdefault(target, []).append(ScScopeVar(
+                name="%s$%s" % ((node.path + ".") if node.path else "", name),
+                node=target, slot=slot, width=32, signed=False, rand=True,
+                loop_local=name, loop_node=owner))
+            self._aux_reads[key] = slot
+        return self._aux_reads[key]
+
+    def _new_aux(self, nid: int) -> int:
+        slot = self.tree.size
+        self.tree.size += 1
+        self._aux[slot] = nid
+        return slot
+
+    def _comp_attr(self, nid: int, apath: Tuple[str, ...]) -> Optional[int]:
+        """The slot that holds ``comp.<apath>`` for a constraint of node
+        *nid* (G4). A component attribute is fixed once the tree is
+        constructed, so each instance the node may run in gives an input,
+        pinned from the component object when the cone is solved. With one
+        instance the read IS that input; with several, it is a variable tied
+        to the input of the instance the node's ``comp`` chooses."""
+        key = (nid, apath)
+        if key in self._aux_reads:
+            return self._aux_reads[key]
+        node = self.tree.nodes[nid]
+        name = ".".join(apath)
+        if self.comps is None:
+            return None             # no component tree: left for the backend
+        root = self.comps.get(self.root_comp)
+        prefix = (node.path + "." if node.path else "") + "comp." + name
+        insts = self._instances(nid)
+        inputs: List[ScScopeVar] = []
+        for k in insts:
+            if k == 0:
+                base, tq = 0, self.root_comp
+            else:
+                sub = next(s for s in root.subs.values() if s.inst == k)
+                base, tq = sub.slot, sub.type_qname
+            lay = self.comps.get(tq)
+            off = lay.slot_of(name)
+            if off is None:
+                raise UnsupportedConstructError(
+                    "component %r has no attribute %r (read as comp.%s in %r)"
+                    % (tq, name, name, node.type_qname), loc=None)
+            dom = leaf_domain(lay.slots[off][1], self.layouts.types)
+            inputs.append(ScScopeVar(
+                name=prefix if len(insts) == 1 else "%s@%d" % (prefix, k),
+                node=nid, slot=self._new_aux(nid), width=dom.width,
+                signed=dom.signed, rand=False, comp_read=base + off))
+        self._aux_vars.setdefault(nid, []).extend(inputs)
+        self._needs_cone.add(nid)
+        if len(inputs) == 1:
+            val = inputs[0].slot
+        else:
+            val = self._new_aux(nid)
+            wide = max(inputs, key=lambda v: (v.width, v.signed))
+            self._aux_vars[nid].append(ScScopeVar(
+                name=prefix, node=nid, slot=val, width=wide.width,
+                signed=wide.signed, rand=True))
+            comp = self._comp_expr(*self._comp_of(nid))
+            for k, v in zip(insts, inputs):
+                self._comp_ties.append((nid, ConstraintImplies(
+                    antecedent=E.ExprBin(lhs=comp, op=E.BinOp.Eq,
+                                         rhs=E.ExprConstant(value=k)),
+                    body=[ConstraintExpr(expr=E.ExprBin(
+                        lhs=E.ExprRefField(base=E.TypeExprRefSelf(), index=val),
+                        op=E.BinOp.Eq,
+                        rhs=E.ExprRefField(base=E.TypeExprRefSelf(), index=v.slot)))])))
+        self._aux_reads[key] = val
+        return val
 
     def _comp_of(self, nid: int) -> Tuple[Optional[int], int]:
         """Node *nid*'s instance as ``(slot, offset)``: the value of the slot
@@ -650,10 +820,13 @@ class TreeBuilder:
                 out.append(ScScopeConstraint(constraint=c, nodes=nodes, kind=kind,
                                              owner=owner, scope=scope, site=site))
 
+        defaults: List[D.DefaultStmt] = []
+        seq = 0
         for node in tree.nodes:
             lay = self._lay[node.id]
             sbase = self._scope_base[node.id]
             resolve = self._resolver(node.id, dict(lay.fields))
+            depth = self._depth(node.id)
             for prefix, fn in constraint_sites(type_constraints(lay.dt), lay.dt,
                                                self.layouts.types):
                 for kind, where in (getattr(fn, "metadata", None) or {}).get(
@@ -662,13 +835,39 @@ class TreeBuilder:
                         "%s'%s' constraint in %r is not supported yet"
                         % (where, kind, getattr(fn, "name", "?")), loc=_loc(fn))
                 for st in getattr(fn, "body", []) or []:
+                    if D.is_default(st):
+                        # Higher in the tree, then shallower in the node's
+                        # own structs, then later, wins (13.1.11 d).
+                        seq += 1
+                        path = default_path(st, prefix)
+                        defaults.append(D.default_stmt(
+                            st, (-depth, -len(prefix), seq), node.id,
+                            [(s, lf) for _, s, lf in
+                             self._leaves_under(node.id, path, dict(lay.fields))],
+                            lambda v, r=resolve, p=prefix: resolve_refs(v, r, p)))
+                        continue
                     add(stmt_to_constraints(st, resolve, fn, prefix),
                         ScopeConstraintKind.TYPE, node.id)
+            # A rand leaf holds only its type's values (an enum's members),
+            # wherever it is solved.
+            for i, leaf in enumerate(lay.own):
+                held = leaf.rand and domain_expr(
+                    node.base + i, leaf_domain(leaf, self.layouts.types))
+                if held:
+                    add([ConstraintExpr(expr=held)], ScopeConstraintKind.TYPE, node.id)
             for ac in lay.constraints:
                 r = self._resolver(node.id, ac.names)
                 for e in ac.stmt.constraints:
                     add(expr_to_constraints(subst_names(e, ac.consts), r),
                         ScopeConstraintKind.ACTIVITY, node.id, scope=sbase + ac.scope)
+        # A default, or a disable, that another node wrote changes what this
+        # node's own problem would solve: the node is solved in a cone.
+        for d in defaults:
+            for s in d.slots:
+                if self._owner_of(s) != d.owner:
+                    self._needs_cone.add(self._owner_of(s))
+        for d, c in D.equalities(defaults):
+            add([c], ScopeConstraintKind.TYPE, d.owner)
         for node in tree.nodes:
             if node.comp_slot is not None:
                 add([ConstraintExpr(expr=self._comp_choice(node.id))],
@@ -681,10 +880,13 @@ class TreeBuilder:
             stmt = self._site_src[site.id]
             if not getattr(stmt.stmt, "inline_constraints", None):
                 continue
-            r = self._resolver(site.owner, stmt.names, target=site.target)
+            r = self._resolver(site.owner, stmt.names, target=site.target,
+                               indices=tuple(v for v in stmt.indices if v))
             for e in stmt.stmt.inline_constraints:
                 add(expr_to_constraints(subst_names(e, stmt.consts), r),
                     ScopeConstraintKind.WITH, site.owner, site=site.id)
+        for nid, tie in self._comp_ties:
+            add([tie], ScopeConstraintKind.COMP, nid)
         return out
 
     def _cones(self) -> None:
@@ -705,7 +907,7 @@ class TreeBuilder:
             cs = [c for c in cons if set(c.nodes or [c.owner]) <= mset]
             trivial = len(members) == 1 and all(
                 c.kind == ScopeConstraintKind.TYPE and c.owner == members[0]
-                for c in cs)
+                for c in cs) and members[0] not in self._needs_cone
             if trivial:
                 continue
             tree.cones.append(ScScopeProblem(
@@ -723,18 +925,16 @@ class TreeBuilder:
                 slot = node.base + i
                 if not leaf.rand and slot not in read:
                     continue
-                width = getattr(leaf.datatype, "bits", 32)
-                if width is None or width <= 0:
-                    width = 32
+                dom = leaf_domain(leaf, self.layouts.types)
                 out.append(ScScopeVar(
                     name=(node.path + "." if node.path else "") + leaf.name,
-                    node=nid, slot=slot, width=width,
-                    signed=bool(getattr(leaf.datatype, "signed", False)),
+                    node=nid, slot=slot, width=dom.width, signed=dom.signed,
                     rand=leaf.rand))
             if node.comp_slot is not None:
                 out.append(ScScopeVar(
                     name=(node.path + "." if node.path else "") + "comp",
                     node=nid, slot=node.comp_slot, width=32, rand=True))
+            out.extend(v for v in self._aux_vars.get(nid, ()) if v.slot in read)
         return out
 
 

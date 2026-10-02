@@ -615,6 +615,11 @@ class ScScopeVar(Base):
 
     A non-rand slot a constraint reads is a variable too, pinned to its value
     in the object when the problem is solved.
+
+    A component attribute a constraint reads (``comp.lane_id``) is a non-rand
+    variable in a slot past the action subtrees, pinned to the value in the
+    component object at slot :attr:`comp_read` (one such input per instance
+    the node may run in).
     """
     name: str = dc.field()
     node: int = dc.field()
@@ -622,6 +627,14 @@ class ScScopeVar(Base):
     width: int = dc.field(default=32)
     signed: bool = dc.field(default=False)
     rand: bool = dc.field(default=True)
+    comp_read: Optional[int] = dc.field(default=None)
+    #: A loop's index variable a ``with`` reads (``repeat (i : N) { do A with
+    #: { x == i; } }``): a variable of the traversed node, pinned when that
+    #: node is solved to the counter named :attr:`loop_local` in the frame of
+    #: node :attr:`loop_node` running the loop; free before (lookahead),
+    #: committed with the node's values after.
+    loop_local: Optional[str] = dc.field(default=None)
+    loop_node: Optional[int] = dc.field(default=None)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScScopeVar(self)

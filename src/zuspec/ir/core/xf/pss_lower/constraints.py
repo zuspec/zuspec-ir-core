@@ -19,9 +19,10 @@ pass does two things a solver backend needs:
   (``build_solve_blob``) addresses variables by.
 
 ``foreach`` (needs array flattening) and ``solve...before`` are deferred and
-reported, not silently dropped. ``soft``/``dist``/``default`` have no IR form
-yet: the front end records them on their block (``metadata["untranslated"]``)
-and ``collect_solve_problem`` refuses such a block.
+reported, not silently dropped. ``soft``/``dist`` have no IR form yet: the
+front end records them on their block (``metadata["untranslated"]``) and
+``collect_solve_problem`` refuses such a block. ``default`` and ``default
+disable`` are resolved over the whole object first (``defaults.py``).
 """
 from __future__ import annotations
 
@@ -34,8 +35,9 @@ from ... import stmt as S
 from ...data_type import DataTypeClass
 from ...scenario import ScCoroutine, ScSolveProblem, ScSolveVar
 from ..validate import UnsupportedConstructError
-from .layout import (is_struct, object_layout, resolve, struct_fields,
-                     struct_functions)
+from . import defaults as D
+from .layout import (domain_expr, is_struct, leaf_domain, object_layout,
+                     resolve, struct_fields, struct_functions)
 
 
 def collect_solve_problem(coro: ScCoroutine, dt: DataTypeClass,
@@ -65,18 +67,34 @@ def collect_solve_problem(coro: ScCoroutine, dt: DataTypeClass,
     resolve = slot_resolver(slots)
 
     constraints: List[C.Constraint] = []
-    for prefix, fn in constraint_sites(coro.pending_constraints, dt, types):
-        # A statement the front end could not translate (`soft`, `dist`,
-        # `default`) is recorded on its block rather than dropped. Solving the
-        # block without it would be a weaker problem than the one written.
+    defaults: List[D.DefaultStmt] = []
+    for seq, (prefix, fn) in enumerate(constraint_sites(coro.pending_constraints, dt, types)):
+        # A statement the front end could not translate (`soft`, `dist`) is
+        # recorded on its block rather than dropped. Solving the block without
+        # it would be a weaker problem than the one written.
         for kind, where in (getattr(fn, "metadata", None) or {}).get("untranslated", ()):
             raise UnsupportedConstructError(
                 "%s'%s' constraint in %r is not supported yet"
                 % (where, kind, getattr(fn, "name", "?")),
                 loc=getattr(fn, "loc", None))
         for st in getattr(fn, "body", []) or []:
+            if D.is_default(st):
+                # The action is the highest-level context here; a struct
+                # attribute's type is lower the deeper it is (13.1.11 d).
+                path = default_path(st, prefix)
+                if handles and path[0].partition("[")[0] in handles:
+                    continue                    # a child's: the tree's cone
+                defaults.append(D.default_stmt(
+                    st, (-len(prefix), seq), None, leaves_under(leaves, path),
+                    lambda v: resolve_refs(v, resolve, prefix)))
+                continue
+            # One through a sub-action handle, or reading a component
+            # attribute, belongs to the action tree's cone, and a node whose
+            # type reads `comp.f` is always solved in one.
             constraints.extend(c for c in stmt_to_constraints(st, resolve, fn, prefix)
-                               if not (handles and reads_handle(c, handles)))
+                               if not (handles and reads_handle(c, handles))
+                               and not reads_comp(c))
+    constraints.extend(c for _, c in D.equalities(defaults))
 
     if not rand_leaves and not constraints:
         return None
@@ -92,14 +110,13 @@ def collect_solve_problem(coro: ScCoroutine, dt: DataTypeClass,
                 "inline field domain on %r is not supported in iteration 1"
                 % leaf.name, loc=getattr(f, "loc", None),
                 remedy="express the range as a named constraint for now")
-        dtp = leaf.datatype
-        width = getattr(dtp, "bits", 32)
-        if width is None or width <= 0:
-            width = 32
-        signed = bool(getattr(dtp, "signed", False))
-        vars_.append(ScSolveVar(name=leaf.name, var_id=vid, slot=slot, width=width,
-                                signed=signed))
+        dom = leaf_domain(leaf, types)
+        vars_.append(ScSolveVar(name=leaf.name, var_id=vid, slot=slot,
+                                width=dom.width, signed=dom.signed))
         writeback[leaf.name] = vid
+        held = domain_expr(slot, dom)
+        if held is not None:
+            constraints.append(C.ConstraintExpr(expr=held))
 
     return ScSolveProblem(vars=vars_, constraints=constraints, writeback=writeback)
 
@@ -168,10 +185,37 @@ def _struct_sites(fields, types, prefix):
 # Stmt -> structured Constraint conversion
 # --------------------------------------------------------------------------- #
 
+def default_path(stmt, prefix=()) -> tuple:
+    """The ``self`` path a ``default``/``default disable`` names."""
+    rp = ref_path(stmt.target)
+    if rp is None and isinstance(stmt.target, E.ExprRefUnresolved):
+        rp = ("self", (stmt.target.name,))
+    if rp is None or rp[0] != "self":
+        raise UnsupportedConstructError(
+            "'default' target is not an attribute path", loc=getattr(stmt, "loc", None))
+    return tuple(prefix) + rp[1]
+
+
+def leaves_under(leaves, path) -> list:
+    """``[(slot, Leaf)]``: the scalar *path* names in *leaves* (one object's
+    layout), or every scalar under it if it names an aggregate."""
+    name = ".".join(path)
+    return [(i, lf) for i, lf in enumerate(leaves)
+            if lf.name == name or lf.name.startswith(name + ".")]
+
+
 def slot_resolver(slots: Dict[str, int]):
     """A resolver over one object: ``self`` paths only, by dotted leaf name."""
     def resolve(root: str, path) -> Optional[int]:
         return slots.get(".".join(path)) if root == "self" else None
+
+    def leaves(root: str, path):
+        if root != "self":
+            return None
+        name = ".".join(path)
+        return [(n[len(name) + 1:], s) for n, s in slots.items()
+                if n.startswith(name + ".")]
+    resolve.leaves = leaves
     return resolve
 
 
@@ -185,6 +229,10 @@ def stmt_to_constraints(stmt, resolve, fn, prefix=()) -> List[C.Constraint]:
 
     if isinstance(stmt, S.StmtExpr):
         return expr_to_constraints(stmt.expr, resolve, prefix)
+
+    # A top-level default is resolved with the object's others (defaults.py);
+    # one that reaches here is under a condition.
+    D.check_unconditioned(stmt, fn)
 
     if isinstance(stmt, S.StmtIf):
         then_body: List[C.Constraint] = []
@@ -261,6 +309,26 @@ def reads_handle(c, handles) -> bool:
     return bool(found)
 
 
+def reads_comp(c) -> bool:
+    """Does constraint *c* read a component attribute (``comp.f``)?"""
+    found = []
+
+    def walk(x):
+        if found:
+            return
+        rp = ref_path(x) if isinstance(x, (E.ExprAttribute, E.ExprSubscript)) else None
+        if rp is not None and len(rp[1]) > 1 and rp[1][0] == "comp":
+            found.append(x)
+            return
+        if dc.is_dataclass(x) and not isinstance(x, type):
+            for f in dc.fields(x):
+                v = getattr(x, f.name)
+                for y in (v if isinstance(v, list) else [v]):
+                    walk(y)
+    walk(c)
+    return bool(found)
+
+
 def ref_path(e):
     """``(root, path)`` of a reference, else None.
 
@@ -290,6 +358,42 @@ def ref_path(e):
     return None
 
 
+def _aggregate_compare(e, resolve, prefix):
+    """``a == b`` (``a != b``) on two struct attributes: each scalar of
+    ``a`` equal to the same scalar of ``b`` (any one of them differing), or
+    None if *e* is not such a comparison. *resolve* lays out aggregates
+    through its ``leaves(root, path)``: ``[(name under path, slot)]``."""
+    if not (isinstance(e, E.ExprBin) and e.op in (E.BinOp.Eq, E.BinOp.NotEq)):
+        return None
+    leaves = getattr(resolve, "leaves", None)
+    lp, rp = ref_path(e.lhs), ref_path(e.rhs)
+    if leaves is None or lp is None or rp is None:
+        return None
+    sides = []
+    for root, path in (lp, rp):
+        if root == "self":
+            path = prefix + path
+        if resolve(root, path) is not None:
+            return None                          # a scalar
+        sides.append(leaves(root, path) or [])
+    if not sides[0] or not sides[1]:
+        return None
+    lhs, rhs = dict(sides[0]), dict(sides[1])
+    if sorted(lhs) != sorted(rhs):
+        raise UnsupportedConstructError(
+            "'%s' compares two aggregates of different types (%s vs %s)"
+            % ("==" if e.op is E.BinOp.Eq else "!=", ".".join(lp[1]), ".".join(rp[1])),
+            loc=getattr(e, "loc", None))
+
+    def ref(slot):
+        return E.ExprRefField(base=E.TypeExprRefSelf(), index=slot)
+    terms = [E.ExprBin(lhs=ref(lhs[n]), op=e.op, rhs=ref(rhs[n])) for n in sorted(lhs)]
+    if len(terms) == 1:
+        return terms[0]
+    return E.ExprBool(op=E.BoolOp.And if e.op is E.BinOp.Eq else E.BoolOp.Or,
+                      values=terms)
+
+
 def resolve_refs(e, resolve, prefix=()):
     """Rewrite ``e``, replacing each resolvable reference with an ``ExprRefField``.
 
@@ -303,6 +407,9 @@ def resolve_refs(e, resolve, prefix=()):
     place, for the backend to report. This walks the expression tree
     structurally (over dataclass fields), so it reaches every nested reference.
     """
+    agg = _aggregate_compare(e, resolve, prefix)
+    if agg is not None:
+        return agg
     rp = ref_path(e)
     if rp is not None:
         root, path = rp

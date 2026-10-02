@@ -118,6 +118,24 @@ class StmtUnique(Stmt):
     """Represents a uniqueness constraint: all listed variables must have distinct values."""
     vars: List[str] = dc.field(default_factory=list)
 
+@dc.dataclass(kw_only=True)
+class StmtDefault(Stmt):
+    """A default value constraint, ``default target == value;`` (LRM 13.1.11).
+
+    It holds as ``target == value`` unless a default or a ``default disable``
+    of higher precedence applies to the same attribute (13.1.11 d). Which one
+    wins depends on every context that reaches the attribute, so a consumer
+    resolves defaults over the whole object before solving; it is never a
+    constraint on its own."""
+    target: Expr = dc.field()
+    value: Expr = dc.field()
+
+@dc.dataclass(kw_only=True)
+class StmtDefaultDisable(Stmt):
+    """``default disable target;`` (LRM 13.1.11): removes the defaults of
+    lower precedence on *target*, or on every scalar under it."""
+    target: Expr = dc.field()
+
 # Phase3: With/Try/Except + Phase2 module-level nodes
 @dc.dataclass(kw_only=True)
 class WithItem(Base):

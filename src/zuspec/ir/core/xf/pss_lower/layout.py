@@ -18,7 +18,8 @@ import dataclasses as dc
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from ... import expr as E
-from ...data_type import DataType, DataTypeClass, DataTypeRef, DataTypeStruct
+from ...data_type import (DataType, DataTypeClass, DataTypeEnum, DataTypeRef,
+                          DataTypeStruct)
 from ..validate import UnsupportedConstructError
 
 
@@ -144,6 +145,74 @@ def slot_count(dt: Any, types: Types) -> int:
     return len(value_leaves(dt, types))
 
 
+class Domain(NamedTuple):
+    """What a scalar leaf may hold, as the solver sees it."""
+    width: int
+    signed: bool
+    #: the legal values, as ``(lo, hi)`` runs, or None for every value of
+    #: *width* bits
+    runs: Optional[Tuple[Tuple[int, int], ...]]
+
+
+def leaf_domain(leaf: Leaf, types: Types) -> Domain:
+    """The solver domain of scalar *leaf*.
+
+    The one place a solver variable's width and legal values come from: the
+    per-type problem (``constraints.collect_solve_problem``) and the action
+    tree's cones (``action_tree``) both ask here. An enum is limited to its
+    members (LRM 7.5) and is as wide as its widest member needs; anything
+    else is its declared width (32 when it has none) with every value legal.
+    """
+    dt = leaf.datatype
+    if isinstance(dt, DataTypeRef):
+        try:
+            dt = resolve(dt, types)
+        except UnsupportedConstructError:
+            pass
+    if isinstance(dt, DataTypeEnum):
+        vals = sorted({int(v) for v in (dt.items or {}).values()})
+        if not vals:
+            raise UnsupportedConstructError(
+                "enum %r has no members, so a rand %r has no legal value"
+                % (getattr(dt, "name", "?"), leaf.name),
+                loc=getattr(leaf.field, "loc", None))
+        signed = vals[0] < 0
+        width = dt.width or max(_bits(v, signed) for v in vals)
+        runs: List[Tuple[int, int]] = []
+        for v in vals:
+            if runs and runs[-1][1] + 1 == v:
+                runs[-1] = (runs[-1][0], v)
+            else:
+                runs.append((v, v))
+        full = (-(1 << (width - 1)), (1 << (width - 1)) - 1) if signed \
+            else (0, (1 << width) - 1)
+        return Domain(width, signed, None if runs == [full] else tuple(runs))
+    width = getattr(dt, "bits", 32)
+    if width is None or width <= 0:
+        width = 32
+    return Domain(width, bool(getattr(dt, "signed", False)), None)
+
+
+def _bits(v: int, signed: bool) -> int:
+    """Bits that hold *v*: one more than its magnitude needs when signed."""
+    if signed:
+        return (v if v >= 0 else ~v).bit_length() + 1
+    return max(1, v.bit_length())
+
+
+def domain_expr(slot: int, dom: Domain) -> Optional[Any]:
+    """``slot in [runs]``, the constraint that holds slot *slot* to *dom*, or
+    None when every value of its width is legal."""
+    if dom.runs is None:
+        return None
+    return E.ExprIn(
+        value=E.ExprRefField(base=E.TypeExprRefSelf(), index=slot),
+        container=E.ExprRangeList(ranges=[
+            E.ExprRange(lower=E.ExprConstant(value=lo),
+                        upper=None if lo == hi else E.ExprConstant(value=hi))
+            for lo, hi in dom.runs]))
+
+
 def prefix_self(e: Any, prefix: Tuple[str, ...]) -> Any:
     """*e* with ``self`` meaning the struct attribute at *prefix*.
 
@@ -207,5 +276,5 @@ __all__ = [
     "prefix_self",
     "Leaf", "resolve", "is_struct", "struct_chain", "struct_fields",
     "struct_functions", "value_leaves", "field_leaves", "object_layout",
-    "slot_count",
+    "slot_count", "Domain", "leaf_domain", "domain_expr",
 ]
