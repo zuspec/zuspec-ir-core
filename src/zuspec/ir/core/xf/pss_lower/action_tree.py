@@ -39,6 +39,7 @@ import dataclasses as dc
 from typing import Any, Dict, List, Optional, Tuple
 
 from ... import expr as E
+from ...expr_phase2 import ExprIfExp
 from ...activity import (
     ActivityAnonTraversal, ActivityAtomic, ActivityBind, ActivityConstraint, ActivityDoWhile,
     ActivityFieldDecl, ActivityForeach, ActivityIfElse, ActivityMatch,
@@ -740,15 +741,23 @@ class TreeBuilder:
             self._aux_vars[nid].append(ScScopeVar(
                 name=prefix, node=nid, slot=val, width=wide.width,
                 signed=wide.signed, rand=True))
+            # One value, chosen by the instance: `comp == k0 ? in0 : ...`,
+            # the last instance unconditional (the choice constraint holds
+            # comp to its candidates). As a value the solver bounds it by
+            # the inputs before comp is chosen; one implication per
+            # instance left it the attribute type's whole range, so a
+            # read like `io.lane == comp.lane_id` was drawn from 0..255
+            # and rejected value by value.
             comp = self._comp_expr(*self._comp_of(nid))
-            for k, v in zip(insts, inputs):
-                self._comp_ties.append((nid, ConstraintImplies(
-                    antecedent=E.ExprBin(lhs=comp, op=E.BinOp.Eq,
-                                         rhs=E.ExprConstant(value=k)),
-                    body=[ConstraintExpr(expr=E.ExprBin(
-                        lhs=E.ExprRefField(base=E.TypeExprRefSelf(), index=val),
-                        op=E.BinOp.Eq,
-                        rhs=E.ExprRefField(base=E.TypeExprRefSelf(), index=v.slot)))])))
+            sel: Any = E.ExprRefField(base=E.TypeExprRefSelf(), index=inputs[-1].slot)
+            for k, v in reversed(list(zip(insts, inputs))[:-1]):
+                sel = ExprIfExp(
+                    test=E.ExprBin(lhs=comp, op=E.BinOp.Eq, rhs=E.ExprConstant(value=k)),
+                    body=E.ExprRefField(base=E.TypeExprRefSelf(), index=v.slot),
+                    orelse=sel)
+            self._comp_ties.append((nid, ConstraintExpr(expr=E.ExprBin(
+                lhs=E.ExprRefField(base=E.TypeExprRefSelf(), index=val),
+                op=E.BinOp.Eq, rhs=sel))))
         self._aux_reads[key] = val
         return val
 
