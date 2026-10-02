@@ -146,6 +146,7 @@ from .scenario import (
     ScInvoke, ScSpawn, ScJoin, ScWait, ScImport, ScImportDecl,
     ScSolveVar, SolveStrategy, SolveInject, ScSolveProblem,
     ScopeKind, COMMITTING_SCOPES, ScActivityScope, ScActionNode,
+    ScPool, ScClaim, ScStateWrite, ScBufferPick,
     ScTraversalSite, ScopeConstraintKind, ScScopeVar, ScScopeConstraint,
     ScScopeProblem, ScActionTree,
     ScActionInst, ScComponentInst,

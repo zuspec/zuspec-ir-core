@@ -275,6 +275,18 @@ class Visitor:
     def visitScTraversalSite(self, o):
         pass
 
+    def visitScPool(self, o):
+        pass
+
+    def visitScClaim(self, o):
+        pass
+
+    def visitScStateWrite(self, o):
+        pass
+
+    def visitScBufferPick(self, o):
+        pass
+
     def visitScScopeVar(self, o):
         pass
 

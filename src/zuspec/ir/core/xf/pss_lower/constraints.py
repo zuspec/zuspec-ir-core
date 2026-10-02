@@ -36,7 +36,7 @@ from ...data_type import DataTypeClass
 from ...scenario import ScCoroutine, ScSolveProblem, ScSolveVar
 from ..validate import UnsupportedConstructError
 from . import defaults as D
-from .layout import (domain_expr, is_struct, leaf_domain, object_layout,
+from .layout import (domain_expr, is_ref, is_struct, leaf_domain, object_layout,
                      resolve, struct_fields, struct_functions)
 
 
@@ -146,7 +146,8 @@ def type_constraints(dt) -> list:
 def constraint_sites(pending, dt, types):
     """``(prefix, constraint function)`` for every constraint in force on an
     object of action *dt*: its own (prefix ``()``), then each struct
-    attribute's type's, at that attribute's path, recursively.
+    attribute's type's, at that attribute's path, recursively -- and each
+    flow-object reference's or claim's type's, at the reference.
 
     A struct's ``pre_solve``/``post_solve`` would run when the attribute is
     solved (LRM 8.3.2); nothing runs them yet, so they are refused rather
@@ -159,7 +160,9 @@ def constraint_sites(pending, dt, types):
 
 def _struct_sites(fields, types, prefix):
     for f in fields:
-        if not is_struct(f.datatype, types):
+        # A flow-object reference or a claim holds its object in the
+        # action, so the object's type's constraints are in force on it.
+        if not (is_struct(f.datatype, types) or (not prefix and is_ref(f))):
             continue
         path = prefix + (f.name,)
         for fn in struct_functions(f.datatype, types):

@@ -40,22 +40,27 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ... import expr as E
 from ...activity import (
-    ActivityAnonTraversal, ActivityAtomic, ActivityConstraint, ActivityDoWhile,
+    ActivityAnonTraversal, ActivityAtomic, ActivityBind, ActivityConstraint, ActivityDoWhile,
     ActivityFieldDecl, ActivityForeach, ActivityIfElse, ActivityMatch,
     ActivityParallel, ActivityRepeat, ActivityReplicate, ActivitySchedule,
     ActivitySelect, ActivitySequenceBlock, ActivityTraversal, ActivityWhileDo,
 )
 from ...data_type import DataTypeArray, DataTypeClass, DataTypeComponent, DataTypeRef
+from ...fields import FieldKind
 from ...scenario import (
-    ScActionNode, ScActionTree, ScActivityScope, ScScopeConstraint,
+    ScActionNode, ScActionTree, ScActivityScope, ScBufferPick, ScClaim, ScPool,
+    ScScopeConstraint, ScStateWrite,
     ScScopeProblem, ScScopeVar, ScTraversalSite, ScopeConstraintKind, ScopeKind,
 )
 from ...constraint import ConstraintExpr, ConstraintImplies
 from ..validate import UnsupportedConstructError
 from . import defaults as D
 from .constraints import (constraint_sites, default_path, expr_to_constraints,
-                          resolve_refs, stmt_to_constraints, type_constraints)
-from .layout import domain_expr, leaf_domain, object_layout, subst_names
+                          resolve_refs, slot_resolver, stmt_to_constraints,
+                          type_constraints)
+from .layout import (domain_expr, is_ref, leaf_domain, object_layout, resolve,
+                     struct_functions, subst_names, object_leaves)
+from .pools import PoolTable
 
 _LOOPS = (ActivityRepeat, ActivityForeach, ActivityDoWhile, ActivityWhileDo)
 
@@ -114,6 +119,15 @@ class _Constraint:
 
 
 @dc.dataclass
+class _Bind:
+    """An activity ``bind`` (11.9): its operands are one object."""
+    stmt: ActivityBind
+    scope: int
+    names: Dict[str, str]
+    consts: Dict[str, int] = dc.field(default_factory=dict)
+
+
+@dc.dataclass
 class TypeLayout:
     """The static layout of one action type's subtree.
 
@@ -126,6 +140,7 @@ class TypeLayout:
     decls: List[_Decl] = dc.field(default_factory=list)
     sites: List[_Site] = dc.field(default_factory=list)
     constraints: List[_Constraint] = dc.field(default_factory=list)
+    binds: List[_Bind] = dc.field(default_factory=list)
     scopes: List[Tuple[ScopeKind, Optional[int]]] = dc.field(default_factory=list)
     fields: Dict[str, str] = dc.field(default_factory=dict)  # handle field -> key
     size: int = 0
@@ -343,6 +358,9 @@ class _Walker:
         if isinstance(s, ActivityConstraint):
             lay.constraints.append(_Constraint(s, scope, self._names(chain), dict(consts)))
             return
+        if isinstance(s, ActivityBind):
+            lay.binds.append(_Bind(s, scope, self._names(chain), dict(consts)))
+            return
         if isinstance(s, ActivityReplicate) and s.label is not None:
             count = s.count
             if not (isinstance(count, E.ExprConstant) and isinstance(count.value, int)):
@@ -459,6 +477,13 @@ class TreeBuilder:
                 n.comp_slot = self.tree.size
                 self._aux[n.comp_slot] = n.id
                 self.tree.size += 1
+        #: B5: constraints flow objects and claims add, as ``add`` takes them
+        self._flow_cons: List[Tuple[list, ScopeConstraintKind, int, Optional[int]]] = []
+        #: B5: a state input's leaf slot -> its pool's current-object slot
+        self._live_from: Dict[int, int] = {}
+        #: B5d: a picked buffer input's leaf slot -> the node's pick index
+        self._pick_of: Dict[int, int] = {}
+        self._flow()
         self._cones()
         return self.tree
 
@@ -808,6 +833,261 @@ class TreeBuilder:
         return E.ExprBin(lhs=self._comp_expr(*lhs), op=E.BinOp.Eq,
                          rhs=self._comp_expr(rslot, roff))
 
+    # -- flow objects and resources (B5) --------------------------------------
+
+    def _flow(self) -> None:
+        """Every node's flow-object references and claims: explicit binds
+        as equalities, state inputs and outputs through their pool's current
+        object, claims through their pool's instances."""
+        tree = self.tree
+        self._pool_ids: Dict[Any, int] = {}
+        self.table = (PoolTable(self.comps, self.root_comp)
+                      if self.comps is not None else None)
+        bound = set()
+        for node in tree.nodes:
+            lay = self._lay[node.id]
+            sbase = self._scope_base[node.id]
+            for b in lay.binds:
+                # `bind a.out b.inp`: the two references are one object, so
+                # each scalar of one equals the other's (D-B13).
+                e = E.ExprBin(lhs=subst_names(b.stmt.src, b.consts), op=E.BinOp.Eq,
+                              rhs=subst_names(b.stmt.dst, b.consts))
+                cs = expr_to_constraints(e, self._resolver(node.id, b.names))
+                refs = set()
+                for c in cs:
+                    for s in self._slots(c):
+                        nid = self._owner_of(s)
+                        if nid is not None and s < self.tree.nodes[nid].base \
+                                + self.tree.nodes[nid].size:
+                            leaf = self._lay[nid].own[s - self.tree.nodes[nid].base]
+                            refs.add((nid, leaf.path[0]))
+                if len(refs) != 2 or not cs:
+                    raise UnsupportedConstructError(
+                        "bind operands must be two flow-object references of "
+                        "actions this activity traverses (11.9)", loc=_loc(b.stmt))
+                bound.update(refs)
+                self._flow_cons.append((cs, ScopeConstraintKind.ACTIVITY, node.id,
+                                        sbase + b.scope))
+        outputs = []
+        for node in tree.nodes:
+            lay = self._lay[node.id]
+            for f in getattr(lay.dt, "fields", []) or []:
+                if not is_ref(f):
+                    continue
+                leaves = [(node.base + i, leaf) for i, leaf in enumerate(lay.own)
+                          if leaf.path[0] == f.name]
+                kind = getattr(resolve(f.datatype, self.layouts.types), "flow_kind", None)
+                if f.kind in (FieldKind.Lock, FieldKind.Share):
+                    self._claim(node, f, leaves)
+                elif kind is not None and kind.name == "STATE":
+                    self._state(node, f, leaves)
+                elif kind is not None and kind.name == "STREAM":
+                    raise UnsupportedConstructError(
+                        "stream reference %r of %r is not supported on bc yet"
+                        % (f.name, node.type_qname), loc=_loc(f))
+                elif f.kind == FieldKind.Input and (node.id, f.name) not in bound:
+                    self._pick(node, f, leaves)
+                elif f.kind == FieldKind.Output:
+                    outputs.append((node, f, leaves))
+        # An output is kept for picking only in a pool something picks from.
+        picked = {pid for n in tree.nodes for pk in n.picks for _, pid in pk.pools}
+        for node, f, leaves in outputs:
+            pools = self._ref_pools(node, f, strict=False)
+            if not pools or not any(self._pool_ids.get(p) in picked for _, p in pools):
+                continue
+            pids = [(k, self._pool(p, "buffer", f.datatype)) for k, p in pools]
+            pool = self.tree.pools[pids[0][1]]
+            by_name = {leaf.name[len(f.name) + 1:]: slot for slot, leaf in leaves}
+            node.buffer_writes.append(ScStateWrite(
+                ref=f.name, src=[by_name[n] for n in pool.leaves], pools=pids))
+
+    def _ref_pools(self, node, f, strict: bool = True) -> List[Tuple[int, Any]]:
+        """``(instance, pool)`` for each component instance *node* may run
+        in: the pool reference *f* then uses (LRM 12.3). Not *strict*: an
+        empty list where a pool is missing."""
+        if self.table is None and not strict:
+            return []
+        if self.table is None:
+            raise UnsupportedConstructError(
+                "reference %r of %r needs a pool, and there is no component "
+                "tree to find one in" % (f.name, node.type_qname), loc=_loc(f))
+        out = []
+        for k in self._instances(node.id):
+            p = self.table.pool_of(k, node.type_qname, f)
+            if p is None and not strict:
+                return []
+            if p is None:
+                raise UnsupportedConstructError(
+                    "reference %r of %r is bound to no pool in component "
+                    "instance %r (12.3)" % (f.name, node.type_qname,
+                                            self.table.insts[k][1] or "<root>"),
+                    loc=_loc(f))
+            out.append((k, p))
+        return out
+
+    def _pool(self, p, kind: str, dt=None) -> int:
+        """The id of pool instance *p* in the tree; a state pool gets its
+        current object's slots, and its initial object as variables of the
+        root (D-B14)."""
+        pid = self._pool_ids.get(p)
+        if pid is not None:
+            return pid
+        pid = len(self.tree.pools)
+        self._pool_ids[p] = pid
+        sp = ScPool(id=pid, inst=p.inst, name=p.name, kind=kind, size=p.size)
+        self.tree.pools.append(sp)
+        types = self.layouts.types
+        if kind == "buffer":
+            sp.leaves = [leaf.name for leaf in object_leaves(dt, types)]
+        if kind != "state":
+            return pid
+        st = resolve(dt, types)
+        leaves = object_leaves(st, types)
+        where = "%s@%s" % (p.name, self.table.insts[p.inst][1] or "<root>")
+        init: Dict[str, int] = {}
+        for leaf in leaves:
+            sp.leaves.append(leaf.name)
+            sp.slots.append(self._new_aux(0))
+            slot = self._new_aux(0)
+            init[leaf.name] = slot
+            dom = leaf_domain(leaf, types)
+            self._aux_vars.setdefault(0, []).append(ScScopeVar(
+                name="%s.$init.%s" % (where, leaf.name), node=0, slot=slot,
+                width=dom.width, signed=dom.signed, rand=True))
+            held = domain_expr(slot, dom)
+            if held is not None:
+                self._flow_cons.append(([ConstraintExpr(expr=held)],
+                                        ScopeConstraintKind.TYPE, 0, None))
+        sp.init_slots = [init[n] for n in sp.leaves]
+        # The initial object: `initial` is true, and the type's constraints
+        # hold on it (12.5).
+        resolve_init = slot_resolver(init)
+        cs = []
+        if "initial" in init:
+            cs.append(ConstraintExpr(expr=E.ExprBin(
+                lhs=E.ExprRefField(base=E.TypeExprRefSelf(), index=init["initial"]),
+                op=E.BinOp.Eq, rhs=E.ExprConstant(value=1))))
+        for fn in struct_functions(st, types):
+            meta = getattr(fn, "metadata", None) or {}
+            if not meta.get("_is_constraint"):
+                continue
+            for s in getattr(fn, "body", []) or []:
+                cs.extend(stmt_to_constraints(s, resolve_init, fn))
+        self._flow_cons.append((cs, ScopeConstraintKind.TYPE, 0, None))
+        self._needs_cone.add(0)
+        return pid
+
+    def _state(self, node, f, leaves) -> None:
+        """A state input reads its pool's current object, pinned when its
+        node is solved; a state output is not the initial object, and is
+        copied into the current object when its node completes (12.5)."""
+        pools = self._ref_pools(node, f)
+        distinct = {p for _, p in pools}
+        if len(distinct) != 1:
+            raise UnsupportedConstructError(
+                "state reference %r of %r reaches a different pool in each "
+                "component instance it may run in; not supported yet"
+                % (f.name, node.type_qname), loc=_loc(f))
+        pid = self._pool(next(iter(distinct)), "state", f.datatype)
+        pool = self.tree.pools[pid]
+        by_name = {leaf.name[len(f.name) + 1:]: slot for slot, leaf in leaves}
+        if f.kind == FieldKind.Input:
+            for name, cur in zip(pool.leaves, pool.slots):
+                self._live_from[by_name[name]] = cur
+        else:
+            if "initial" in by_name:
+                self._flow_cons.append(([ConstraintExpr(expr=E.ExprBin(
+                    lhs=E.ExprRefField(base=E.TypeExprRefSelf(), index=by_name["initial"]),
+                    op=E.BinOp.Eq, rhs=E.ExprConstant(value=0)))],
+                    ScopeConstraintKind.TYPE, node.id, None))
+            node.state_writes.append(ScStateWrite(
+                ref=f.name, src=[by_name[n] for n in pool.leaves],
+                pools=[(k, pid) for k, _ in pools]))
+        self._needs_cone.add(node.id)
+
+    def _pick(self, node, f, leaves) -> None:
+        """A buffer input no ``bind`` connects is one of the objects its
+        pool already holds (B5d): its leaves, and the pool it is picked
+        from, are free until its node is solved, when the activation tries
+        the pool's completed objects in a seeded order (D-B5)."""
+        if node.picks:
+            raise UnsupportedConstructError(
+                "%r has two buffer inputs bound to no output; picking more "
+                "than one is not supported yet" % node.type_qname, loc=_loc(f))
+        pools = self._ref_pools(node, f)
+        pids = [(k, self._pool(p, "buffer", f.datatype)) for k, p in pools]
+        pool = self.tree.pools[pids[0][1]]
+        by_name = {leaf.name[len(f.name) + 1:]: slot for slot, leaf in leaves}
+        sel = self._new_aux(node.id)
+        idx = len(node.picks)
+        node.picks.append(ScBufferPick(ref=f.name, slots=[by_name[n] for n in pool.leaves],
+                                       sel_slot=sel, pools=pids))
+        for slot in by_name.values():
+            self._pick_of[slot] = idx
+        self._aux_vars.setdefault(node.id, []).append(ScScopeVar(
+            name="%s%s$pool" % ((node.path + ".") if node.path else "", f.name),
+            node=node.id, slot=sel, width=32, rand=True, pick=idx))
+        comp = self._comp_expr(*self._comp_of(node.id))
+        ref = E.ExprRefField(base=E.TypeExprRefSelf(), index=sel)
+        cs = []
+        for k, pid in pids:
+            eq = ConstraintExpr(expr=E.ExprBin(lhs=ref, op=E.BinOp.Eq,
+                                               rhs=E.ExprConstant(value=pid)))
+            cs.append(eq if len(pids) == 1 else ConstraintImplies(
+                antecedent=E.ExprBin(lhs=comp, op=E.BinOp.Eq, rhs=E.ExprConstant(value=k)),
+                body=[eq]))
+        self._flow_cons.append((cs, ScopeConstraintKind.TYPE, node.id, None))
+        self._needs_cone.add(node.id)
+
+    def _claim(self, node, f, leaves) -> None:
+        """A claim's ``instance_id`` is one of its pool's instances (12.4),
+        and not one a claim in force holds: a bit mask of those, pinned when
+        the node is solved (D-B12)."""
+        lock = f.kind == FieldKind.Lock
+        iid = next((s for s, leaf in leaves if leaf.path[1:] == ("instance_id",)), None)
+        if iid is None or any(leaf.rand and leaf.path[1:] != ("instance_id",)
+                              for _, leaf in leaves):
+            raise UnsupportedConstructError(
+                "resource %r of %r has rand attributes; only instance_id is "
+                "supported on bc yet" % (f.name, node.type_qname), loc=_loc(f))
+        pools = self._ref_pools(node, f)
+        comp = self._comp_expr(*self._comp_of(node.id))
+        ref = E.ExprRefField(base=E.TypeExprRefSelf(), index=iid)
+        masks: Dict[Any, int] = {}
+        claim = ScClaim(ref=f.name, lock=lock, iid_slot=iid)
+        for k, p in pools:
+            if not p.size or p.size < 1:
+                raise UnsupportedConstructError(
+                    "resource pool %s has no instances (12.4)" % p, loc=_loc(f))
+            if p.size > 64:
+                raise UnsupportedConstructError(
+                    "resource pool %s has %d instances; bc supports at most 64 "
+                    "yet" % (p, p.size), loc=_loc(f))
+            pid = self._pool(p, "resource")
+            claim.pools.append((k, pid))
+            if p not in masks:
+                slot = self._new_aux(node.id)
+                masks[p] = slot
+                self._aux_vars.setdefault(node.id, []).append(ScScopeVar(
+                    name="%s%s$busy@%d" % ((node.path + ".") if node.path else "",
+                                           f.name, pid),
+                    node=node.id, slot=slot, width=p.size, rand=True,
+                    busy_pool=pid, busy_lock=lock))
+            mask = E.ExprRefField(base=E.TypeExprRefSelf(), index=masks[p])
+            body = [
+                ConstraintExpr(expr=E.ExprBin(lhs=ref, op=E.BinOp.Lt,
+                                              rhs=E.ExprConstant(value=p.size))),
+                ConstraintExpr(expr=E.ExprBin(
+                    lhs=E.ExprBin(lhs=E.ExprBin(lhs=mask, op=E.BinOp.RShift, rhs=ref),
+                                  op=E.BinOp.BitAnd, rhs=E.ExprConstant(value=1)),
+                    op=E.BinOp.Eq, rhs=E.ExprConstant(value=0)))]
+            cs = body if len(pools) == 1 else [ConstraintImplies(
+                antecedent=E.ExprBin(lhs=comp, op=E.BinOp.Eq, rhs=E.ExprConstant(value=k)),
+                body=body)]
+            self._flow_cons.append((cs, ScopeConstraintKind.TYPE, node.id, None))
+        node.claims.append(claim)
+        self._needs_cone.add(node.id)
+
     # -- constraints and cones ----------------------------------------------
 
     def _constraints(self) -> List[ScScopeConstraint]:
@@ -887,6 +1167,8 @@ class TreeBuilder:
                     ScopeConstraintKind.WITH, site.owner, site=site.id)
         for nid, tie in self._comp_ties:
             add([tie], ScopeConstraintKind.COMP, nid)
+        for cs, kind, owner, scope in self._flow_cons:
+            add(cs, kind, owner, scope=scope)
         return out
 
     def _cones(self) -> None:
@@ -923,18 +1205,22 @@ class TreeBuilder:
             node = self.tree.nodes[nid]
             for i, leaf in enumerate(self._lay[nid].own):
                 slot = node.base + i
-                if not leaf.rand and slot not in read:
+                if not leaf.rand and slot not in read and slot not in self._live_from:
                     continue
                 dom = leaf_domain(leaf, self.layouts.types)
                 out.append(ScScopeVar(
                     name=(node.path + "." if node.path else "") + leaf.name,
                     node=nid, slot=slot, width=dom.width, signed=dom.signed,
-                    rand=leaf.rand))
+                    rand=leaf.rand, live_from=self._live_from.get(slot),
+                    pick=self._pick_of.get(slot)))
             if node.comp_slot is not None:
                 out.append(ScScopeVar(
                     name=(node.path + "." if node.path else "") + "comp",
                     node=nid, slot=node.comp_slot, width=32, rand=True))
-            out.extend(v for v in self._aux_vars.get(nid, ()) if v.slot in read)
+            # (A state pool's initial object is the root's, read or not.)
+            out.extend(v for v in self._aux_vars.get(nid, ())
+                       if v.slot in read or (v.rand and v.busy_pool is None
+                                             and v.loop_local is None))
         return out
 
 

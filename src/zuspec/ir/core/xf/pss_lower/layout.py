@@ -7,10 +7,14 @@ consumer that addresses a slot -- the scenario pass (``ScField``), the solve
 problem (``ScSolveVar.slot``), bc's procedural lowering and its locals -- takes
 the layout from here, so a slot means the same thing to all of them.
 
+A flow-object reference or a resource claim is laid out the same way: one slot
+per scalar of the object it references (``inp.tag``, ``chan.instance_id``),
+in the action that declares it (``ref_leaves``).
+
 A leaf is named by its dotted path from the object (``s.csr.eol``). Anything
-that is not a plain-data struct -- a scalar, an array, an action handle, a flow
-object reference, a resource claim -- is one opaque slot, exactly as before;
-what an opaque slot may be used for is each consumer's business.
+else that is not a plain-data struct -- a scalar, an array, an action handle --
+is one opaque slot, exactly as before; what an opaque slot may be used for is
+each consumer's business.
 """
 from __future__ import annotations
 
@@ -126,8 +130,42 @@ def value_leaves(dt: Any, types: Types, path: Tuple[str, ...] = (),
     return out
 
 
+def is_ref(f: Any) -> bool:
+    """Is *f* a flow-object reference (``input``/``output``) or a resource
+    claim (``lock``/``share``)?"""
+    from ...fields import FieldKind
+    return getattr(f, "kind", None) in (FieldKind.Input, FieldKind.Output,
+                                        FieldKind.Lock, FieldKind.Share)
+
+
+def ref_leaves(f: Any, types: Types) -> List[Leaf]:
+    """The leaves of reference *f*: the object it references, laid out in its
+    action like a struct attribute (``inp.tag``). Its ``rand`` attributes are
+    randomized with the action (LRM 9.3, 9.4); a claim's ``instance_id`` is
+    chosen with it (12.4), and so is a state's ``initial`` (12.5): pinned to
+    the pool's current object for an input, false for an output."""
+    return object_leaves(f.datatype, types, (f.name,))
+
+
+def object_leaves(dt: Any, types: Types, path: Tuple[str, ...] = ()) -> List[Leaf]:
+    """The leaves of a flow object or resource of type *dt*, rooted at
+    *path* (see :func:`ref_leaves`)."""
+    dt = resolve(dt, types)
+    out: List[Leaf] = []
+    for sub in struct_fields(dt, types):
+        kind = getattr(getattr(dt, "flow_kind", None), "name", None)
+        rand = (getattr(sub, "rand_kind", None) is not None
+                or (sub.name == "instance_id" and kind == "RESOURCE")
+                or (sub.name == "initial" and kind == "STATE"))
+        out.extend(value_leaves(sub.datatype, types, path + (sub.name,), sub, rand,
+                                (id(dt),)))
+    return out
+
+
 def field_leaves(f: Any, types: Types) -> List[Leaf]:
     """The leaves of attribute *f*, rooted at its name."""
+    if is_ref(f):
+        return ref_leaves(f, types)
     return value_leaves(f.datatype, types, (f.name,), f,
                         getattr(f, "rand_kind", None) is not None)
 
@@ -276,5 +314,6 @@ __all__ = [
     "prefix_self",
     "Leaf", "resolve", "is_struct", "struct_chain", "struct_fields",
     "struct_functions", "value_leaves", "field_leaves", "object_layout",
+    "is_ref", "ref_leaves", "object_leaves",
     "slot_count", "Domain", "leaf_domain", "domain_expr",
 ]

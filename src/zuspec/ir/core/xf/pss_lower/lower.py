@@ -11,7 +11,7 @@ from ...activity import (
     ActivityRepeat, ActivityForeach, ActivityIfElse, ActivityMatch, MatchCase,
     ActivityAtomic, ActivityParallel, ActivitySchedule, ActivitySelect,
     ActivityDoWhile, ActivityReplicate, ActivitySchedulingConstraint, ActivityFieldDecl,
-    ActivityConstraint,
+    ActivityConstraint, ActivityBind,
 )
 from ...fields import FieldKind
 from ...scenario import (
@@ -697,9 +697,11 @@ class PSSToScenarioPass:
             if isinstance(s, ActivityFieldDecl):
                 self._check_field_decl(s)
                 continue
-            if isinstance(s, ActivityConstraint) and self._cur_layout is not None:
+            if isinstance(s, (ActivityConstraint, ActivityBind)) \
+                    and self._cur_layout is not None:
                 # In force while its scope is (13.1.9 b.3): the action tree
                 # holds it, tagged with that scope, and the cone solves it.
+                # A `bind` is an equality there (11.9, D-B13).
                 continue
             out.append(self._lower_activity_stmt(s))
         return out

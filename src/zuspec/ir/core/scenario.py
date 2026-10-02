@@ -575,9 +575,99 @@ class ScActionNode(Base):
     children: List[int] = dc.field(default_factory=list)
     comp: List[int] = dc.field(default_factory=lambda: [0])
     comp_slot: Optional[int] = dc.field(default=None)
+    #: B5: the resources it claims, recorded when its solve commits and
+    #: released when it completes
+    claims: List['ScClaim'] = dc.field(default_factory=list)
+    #: B5: the state objects it outputs, copied into their pools' current
+    #: objects when it completes
+    state_writes: List['ScStateWrite'] = dc.field(default_factory=list)
+    #: B5: the buffer objects it outputs to a pool a pick reads, added to
+    #: the pool's completed objects when it completes
+    buffer_writes: List['ScStateWrite'] = dc.field(default_factory=list)
+    #: B5: its buffer inputs bound to no output: each picks a completed
+    #: object of its pool when the node is solved
+    picks: List['ScBufferPick'] = dc.field(default_factory=list)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScActionNode(self)
+
+
+@dc.dataclass(kw_only=True)
+class ScBufferPick(Base):
+    """A buffer input no ``bind`` connects (B5, LRM 12.3, 14): when its node
+    is solved, it is one of the objects already output to its pool, whose
+    producers have completed. :attr:`slots` are the input's leaves, in the
+    order of the pool's :attr:`ScPool.leaves`; :attr:`sel_slot` holds the
+    pool picked from, tied to the node's component instance by
+    :attr:`pools` (``(instance, pool id)``)."""
+    ref: str = dc.field()
+    slots: List[int] = dc.field(default_factory=list)
+    sel_slot: int = dc.field()
+    pools: List[Tuple[int, int]] = dc.field(default_factory=list)
+
+    def accept(self, v: 'Visitor') -> None:
+        v.visitScBufferPick(self)
+
+
+@dc.dataclass(kw_only=True)
+class ScPool(Base):
+    """A pool instance an activation uses (B5, LRM 12.3): pool *name*
+    declared in component instance *inst*.
+
+    Attributes:
+        id:     Index in :attr:`ScActionTree.pools`.
+        kind:   ``"buffer"``, ``"stream"``, ``"state"`` or ``"resource"``.
+        size:   A resource pool's instance count.
+        slots:  A state pool: the slots of the activation's object holding
+                its current object, one per scalar of its type, named
+                ``leaves`` (``ready``, ``initial``).
+    """
+    id: int = dc.field()
+    inst: int = dc.field()
+    name: str = dc.field()
+    kind: str = dc.field()
+    size: Optional[int] = dc.field(default=None)
+    slots: List[int] = dc.field(default_factory=list)
+    leaves: List[str] = dc.field(default_factory=list)
+    #: a state pool: the root's variables its initial object is solved in,
+    #: copied to :attr:`slots` when the root's solve commits
+    init_slots: List[int] = dc.field(default_factory=list)
+
+    def accept(self, v: 'Visitor') -> None:
+        v.visitScPool(self)
+
+
+@dc.dataclass(kw_only=True)
+class ScClaim(Base):
+    """A resource claim of a node (B5, LRM 9.4): ``lock`` (exclusive) or
+    ``share``. Its ``instance_id`` is chosen by the node's solve, in slot
+    :attr:`iid_slot`. :attr:`pools` maps each component instance the node may
+    run in to the pool the claim then uses: ``(instance, pool id)``.
+    """
+    ref: str = dc.field()
+    lock: bool = dc.field(default=True)
+    iid_slot: int = dc.field()
+    pools: List[Tuple[int, int]] = dc.field(default_factory=list)
+
+    def accept(self, v: 'Visitor') -> None:
+        v.visitScClaim(self)
+
+
+@dc.dataclass(kw_only=True)
+class ScStateWrite(Base):
+    """An output a node publishes when it completes (B5). In
+    :attr:`ScActionNode.state_writes`, a state output (LRM 12.5): each slot
+    of :attr:`src` (its reference's leaves) is copied to the same position
+    of its pool's current object. In :attr:`ScActionNode.buffer_writes`, a
+    buffer output: the values of :attr:`src` join the objects its pool
+    holds for a pick. :attr:`pools` maps each component instance the node
+    may run in to that pool: ``(instance, pool id)``."""
+    ref: str = dc.field()
+    src: List[int] = dc.field(default_factory=list)
+    pools: List[Tuple[int, int]] = dc.field(default_factory=list)
+
+    def accept(self, v: 'Visitor') -> None:
+        v.visitScStateWrite(self)
 
 
 @dc.dataclass(kw_only=True)
@@ -635,6 +725,19 @@ class ScScopeVar(Base):
     #: committed with the node's values after.
     loop_local: Optional[str] = dc.field(default=None)
     loop_node: Optional[int] = dc.field(default=None)
+    #: B5: a state input's leaf, pinned when its node is solved to the value
+    #: in slot :attr:`live_from` of the activation's object (its pool's
+    #: current object); free before, committed after
+    live_from: Optional[int] = dc.field(default=None)
+    #: B5: the instances of pool :attr:`busy_pool` a claim of the node may
+    #: not take, as a bit mask: pinned when the node is solved from the
+    #: claims in force (:attr:`busy_lock`: the claim locks), free before
+    busy_pool: Optional[int] = dc.field(default=None)
+    busy_lock: bool = dc.field(default=True)
+    #: B5: a leaf (or the pool selector) of the node's buffer input
+    #: :attr:`ScActionNode.picks` [:attr:`pick`]: free before the node is
+    #: solved, pinned to the object picked when it is
+    pick: Optional[int] = dc.field(default=None)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScScopeVar(self)
@@ -704,6 +807,8 @@ class ScActionTree(Base):
     scopes: List[ScActivityScope] = dc.field(default_factory=list)
     sites: List[ScTraversalSite] = dc.field(default_factory=list)
     cones: List[ScScopeProblem] = dc.field(default_factory=list)
+    #: B5: the pool instances its references use (:class:`ScPool`)
+    pools: List['ScPool'] = dc.field(default_factory=list)
     #: False only for calibration (P1.6, design §5.4 ``greedy-nohoist``): a
     #: traversal's solve sees only the constraints over its own values and
     #: values already committed -- none over a node still to be traversed.
@@ -967,6 +1072,10 @@ __all__ = [
     "COMMITTING_SCOPES",
     "ScActivityScope",
     "ScActionNode",
+    "ScPool",
+    "ScClaim",
+    "ScStateWrite",
+    "ScBufferPick",
     "ScTraversalSite",
     "ScopeConstraintKind",
     "ScScopeVar",
