@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import dataclasses as dc
-from typing import List
+from typing import Dict, List
 
 
 @dc.dataclass
@@ -79,8 +79,11 @@ class ModuleInstance:
         module: Target module (the instantiated module's name).
         name: Instance name.
         connections: Ordered ``.port(signal)`` connections.
+        parameters: Ordered ``#(.NAME(value))`` overrides; values are emitted as
+            written (e.g. ``"16"``).
     """
 
     module: str = dc.field()
     name: str = dc.field()
     connections: List[PortConnection] = dc.field(default_factory=list)
+    parameters: Dict[str, str] = dc.field(default_factory=dict)

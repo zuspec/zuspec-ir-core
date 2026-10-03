@@ -50,6 +50,8 @@ def json_converter(pmod, *args, **kwargs):
 from .provenance import Provenance
 from .domain_node import DomainNode
 from .connection import Connection, Signal, Bundle, MethodInterface, PortConnection, ModuleInstance
+from .signature import (BlockSignature, ChannelSignature, load_signature, save_signature,
+                        signature_from_json, signature_to_json)
 
 # Re-export data model types
 from .fields import Bind, BindSet, Field, FieldInOut, FieldKind, SignalDirection, RandKind, FieldMetaKind, ClaimMode, Pool, PoolBind
@@ -87,6 +89,7 @@ from .expr import (
     CompletionAwaitExpr, QueueGetExpr,
     # zdc built-in typed IR nodes
     ExprSext, ExprZext, ExprCbit, ExprSigned,
+    ExprConcat, ExprReplicate, ExprPartSelect,
     # class-model (non-synthesizable) nodes
     ExprNew,
 )
@@ -204,6 +207,7 @@ __all__ = [
     "CompletionAwaitExpr","QueueGetExpr",
     # zdc built-in typed IR nodes
     "ExprSext","ExprZext","ExprCbit","ExprSigned","ExprNew",
+    "ExprConcat","ExprReplicate","ExprPartSelect",
     "Stmt","StmtExpr","StmtAssign","StmtAnnAssign","StmtAugAssign","StmtReturn","StmtIf","StmtFor","StmtWhile",
     "StmtBreak","StmtContinue","StmtPass","StmtRaise","StmtAssert","StmtAssume","StmtCover","StmtUnique","StmtDefault","StmtDefaultDisable","Alias","Arg","Arguments",
     # PSS-specific statements
@@ -246,6 +250,9 @@ __all__ = [
     "Lowerable","ElaboratableInterface","SVEmittableInterface",
     "SVAEmittableInterface","CSimEmittableInterface",
     "AbstractionFieldIR","LoweringRegistry","global_registry",
+    # Engine-neutral block signature
+    "BlockSignature","ChannelSignature","signature_to_json","signature_from_json",
+    "save_signature","load_signature",
 ]
 
 # Important to place after all data-model classes have been imported

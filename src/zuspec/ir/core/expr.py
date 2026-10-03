@@ -32,9 +32,14 @@ class BinOp(enum.Enum):
     BitAnd = enum.auto(); BitOr = enum.auto(); BitXor = enum.auto(); LShift = enum.auto(); RShift = enum.auto()
     Eq = enum.auto(); NotEq = enum.auto(); Lt = enum.auto(); LtE = enum.auto(); Gt = enum.auto(); GtE = enum.auto()
     And = enum.auto(); Or = enum.auto()
+    #: SV ``>>>``: arithmetic when the left operand is signed, logical when it
+    #: is unsigned. (``RShift`` is always logical.)
+    ARShift = enum.auto()
 
 class UnaryOp(enum.Enum):
     Invert = enum.auto(); Not = enum.auto(); UAdd = enum.auto(); USub = enum.auto()
+    #: SV unary reductions ``&x``, ``|x``, ``^x``: a 1-bit result.
+    AndReduce = enum.auto(); OrReduce = enum.auto(); XorReduce = enum.auto()
 
 class BoolOp(enum.Enum):
     And = enum.auto(); Or = enum.auto()
@@ -465,6 +470,36 @@ class ExprSigned(Expr):
     Equivalent to RTL: ``$signed(value)``
     """
     value: Expr = dc.field()
+
+
+@dc.dataclass(kw_only=True)
+class ExprConcat(Expr):
+    """Bit concatenation ``{a, b, ...}``: ``values[0]`` is the most significant.
+
+    The result is unsigned and as wide as the sum of the operand widths.
+    """
+    values: list[Expr] = dc.field(default_factory=list)
+
+
+@dc.dataclass(kw_only=True)
+class ExprReplicate(Expr):
+    """Replication ``{count{value}}``; *count* is a compile-time constant."""
+    count: int = dc.field()
+    value: Expr = dc.field()
+
+
+@dc.dataclass(kw_only=True)
+class ExprPartSelect(Expr):
+    """Part select of *width* bits starting at bit *base*: SV ``value[base +: width]``.
+
+    *base* may be any expression; bits outside *value* read as 0. A constant
+    ``x[hi:lo]`` is ``ExprPartSelect(x, lo, hi-lo+1)`` too, so every part
+    select has a width known without evaluating anything. As an assignment
+    target, bits outside *value* are not written.
+    """
+    value: Expr = dc.field()
+    base: Expr = dc.field()
+    width: int = dc.field()
 
 
 @dc.dataclass(kw_only=True)

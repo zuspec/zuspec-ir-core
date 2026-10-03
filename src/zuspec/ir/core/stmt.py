@@ -13,6 +13,9 @@ class Alias(Base):
 class Arg(Base):
     arg: str = dc.field()
     annotation: Optional[Expr] = dc.field(default=None)
+    #: The argument's type, when the front end resolved one (``annotation``
+    #: holds the type as written, if anything).
+    datatype: Optional[Any] = dc.field(default=None)
 
 @dc.dataclass(kw_only=True)
 class Arguments(Base):
