@@ -73,7 +73,7 @@ from .data_type import (
 )
 from .expr import (
     Expr, BinOp, UnaryOp, BoolOp, CmpOp, AugOp,
-    ExprBin, ExprRef, ExprConstant, TypeExprRefSelf, TypeExprRefSuper, TypeExprRefTraversed,
+    ExprBin, ExprRef, ExprConstant, int_literal_type, TypeExprRefSelf, TypeExprRefSuper, TypeExprRefTraversed,
     ExprRefField,
     ExprRefParam, ExprRefLocal, ExprRefUnresolved, ExprRefPy,
     ExprRefBottomUp, ExprUnary, ExprBool, ExprCompare,
@@ -191,7 +191,7 @@ __all__ = [
     "DataTypeRegister","DataTypeRegisterGroup",
     # Interface-protocol types
     "IfProtocolProperties","IfProtocolType","CompletionType","QueueType",
-    "Expr","BinOp","UnaryOp","BoolOp","CmpOp","AugOp","ExprBin","ExprRef","ExprConstant",
+    "Expr","BinOp","UnaryOp","BoolOp","CmpOp","AugOp","ExprBin","ExprRef","ExprConstant","int_literal_type",
     "TypeExprRefSelf","TypeExprRefSuper","TypeExprRefTraversed","ExprRefField","ExprRefParam","ExprRefLocal","ExprRefUnresolved",
     "ExprRefPy","ExprRefBottomUp","ExprUnary",
     "ExprBool","ExprCompare","ExprAttribute","ExprSlice","ExprSubscript","ExprCall","Keyword","ExprAwait",

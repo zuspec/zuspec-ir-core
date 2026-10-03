@@ -16,7 +16,7 @@
 from __future__ import annotations
 import dataclasses as dc
 import enum
-from typing import Optional, TYPE_CHECKING
+from typing import Optional, Tuple, TYPE_CHECKING
 from .base import Base
 
 if TYPE_CHECKING:
@@ -63,7 +63,40 @@ class ExprRef(Expr):
 
 @dc.dataclass(kw_only=True)
 class ExprConstant(Expr):
+    """A constant. An integer literal also carries its type (PSS Table 21),
+    which its spelling decides and its value does not: ``16`` is a signed
+    ``int``, ``0x10`` an unsigned ``bit[32]``, ``8'hFF`` a ``bit[8]``.
+
+    ``width`` is the literal's size, 0 for an unsized one (then the type is
+    N bits, N minimal for the value but at least 32). ``signed`` is None for
+    the default, an unsized decimal; see :func:`int_literal_type`.
+    """
     value: object = dc.field()
+    width: int = dc.field(default=0)
+    signed: Optional[bool] = dc.field(default=None)
+
+
+def int_literal_type(c: "ExprConstant") -> Tuple[int, bool]:
+    """(width, signed) of an integer literal (PSS 4.6.1, Table 21).
+
+    An unsized decimal or octal literal is ``int[N]`` and an unsized
+    hexadecimal or binary one ``bit[N]``, N the fewest bits that hold the
+    value but at least 32. A sized literal (``8'hFF``) is exactly its size,
+    and a based literal is signed only when written with ``s`` (``4'sd3``).
+    A value no signed 64-bit type holds but an unsigned one does is typed
+    ``bit[64]``, the widest type a consumer of this IR holds.
+    """
+    v = int(c.value)
+    signed = True if c.signed is None else bool(c.signed)
+    if c.width:
+        return c.width, signed
+    if signed:
+        n = v.bit_length() + 1 if v >= 0 else (-v - 1).bit_length() + 1
+        if n > 64 and 0 <= v < (1 << 64):
+            return 64, False
+    else:
+        n = v.bit_length() if v >= 0 else (-v - 1).bit_length() + 1
+    return max(32, n), signed
 
 @dc.dataclass
 class TypeExprRefSelf(ExprRef): 
