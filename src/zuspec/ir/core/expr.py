@@ -79,6 +79,13 @@ class ExprConstant(Expr):
     value: object = dc.field()
     width: int = dc.field(default=0)
     signed: Optional[bool] = dc.field(default=None)
+    #: The qualified PSS name of the `static const` or enum item this
+    #: constant was folded from (``wb_dma_types_pkg::WB_DMA_MAX_CH``,
+    #: ``wb_dma_types_pkg::wb_dma_status_e::WB_DMA_PENDING``), as the linker
+    #: resolved it; None for a literal. Provenance only: a consumer that
+    #: wants a value reads ``value`` and may ignore this. A folded constant
+    #: carries its DECLARED type in ``width``/``signed``.
+    ref: Optional[str] = dc.field(default=None, compare=False)
 
 
 def int_literal_type(c: "ExprConstant") -> Tuple[int, bool]:

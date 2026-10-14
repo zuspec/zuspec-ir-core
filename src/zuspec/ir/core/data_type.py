@@ -193,6 +193,10 @@ class DataTypeArray(DataType):
     """
     element_type: Optional[DataType] = dc.field(default=None)
     size: int = dc.field(default=-1)
+    #: The qualified PSS name of the `static const` the size was written as
+    #: (``ch[wb_dma_types_pkg::WB_DMA_MAX_CH]``), or None. Provenance only;
+    #: ``size`` is the value.
+    size_ref: Optional[str] = dc.field(default=None, compare=False)
 
 @dc.dataclass(kw_only=True)
 class DataTypeMap(DataType):
