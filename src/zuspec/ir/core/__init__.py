@@ -99,7 +99,7 @@ from .expr_phase2 import (
     ExprJoinedStr, ExprFormattedValue
 )
 from .stmt import (
-    Stmt, StmtExpr, StmtAssign, StmtAnnAssign, StmtAugAssign, StmtReturn, StmtIf, StmtFor,
+    Stmt, StmtExpr, StmtAssign, StmtAnnAssign, StmtAugAssign, StmtReturn, StmtIf, StmtIfClause, StmtIfChain, StmtFor,
     StmtWhile, StmtBreak, StmtContinue, StmtPass, StmtRaise, StmtAssert, Alias, Arg, Arguments,
     StmtAssume, StmtCover, StmtUnique, StmtDefault, StmtDefaultDisable,
     WithItem, StmtWith, StmtExceptHandler, StmtTry, TypeIgnore, Module,
@@ -208,7 +208,7 @@ __all__ = [
     # zdc built-in typed IR nodes
     "ExprSext","ExprZext","ExprCbit","ExprSigned","ExprNew",
     "ExprConcat","ExprReplicate","ExprPartSelect",
-    "Stmt","StmtExpr","StmtAssign","StmtAnnAssign","StmtAugAssign","StmtReturn","StmtIf","StmtFor","StmtWhile",
+    "Stmt","StmtExpr","StmtAssign","StmtAnnAssign","StmtAugAssign","StmtReturn","StmtIf","StmtIfClause","StmtIfChain","StmtFor","StmtWhile",
     "StmtBreak","StmtContinue","StmtPass","StmtRaise","StmtAssert","StmtAssume","StmtCover","StmtUnique","StmtDefault","StmtDefaultDisable","Alias","Arg","Arguments",
     # PSS-specific statements
     "StmtRepeat","StmtRepeatWhile","StmtForeach","StmtYield","StmtSuper","StmtRandomize",

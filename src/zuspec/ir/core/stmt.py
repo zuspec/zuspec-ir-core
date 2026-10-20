@@ -70,6 +70,28 @@ class StmtIf(Stmt):
     pragmas: Dict[str, Any] = dc.field(default_factory=dict)
 
 @dc.dataclass(kw_only=True)
+class StmtIfClause(Base):
+    """One ``if (test) body`` link of a :class:`StmtIfChain`."""
+    test: Expr = dc.field()
+    body: List[Stmt] = dc.field(default_factory=list)
+
+@dc.dataclass(kw_only=True)
+class StmtIfChain(Stmt):
+    """``if (c0) b0 else if (c1) b1 ... else orelse``, flat.
+
+    The first clause whose test holds runs; if none does, ``orelse`` runs.
+    A clause's test is evaluated only when every earlier one was false.
+
+    The same thing as a :class:`StmtIf` nested in each ``orelse``, which is
+    how a chain was held before: one level per link, so a generated chain of
+    thousands of links was thousands of levels deep for every walker. A front
+    end produces this for an ``if`` with at least one ``else if``; a consumer
+    accepts any number of clauses from one.
+    """
+    clauses: List[StmtIfClause] = dc.field(default_factory=list)
+    orelse: List[Stmt] = dc.field(default_factory=list)
+
+@dc.dataclass(kw_only=True)
 class StmtFor(Stmt):
     target: Expr = dc.field()
     iter: Expr = dc.field()
