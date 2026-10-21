@@ -151,10 +151,10 @@ class TestAnnotationRoundTrip:
         """ZIR-1: annotations, an enum-item value and a loc survive."""
         from zuspec.ir.core import Annotation, AnnotationEnum, DataTypeEnum
         original = DataTypeEnum(
-            name="std_rv_e", items={"OK": 0, "ERR": 1},
+            name="result_e", items={"OK": 0, "ERR": 1},
             annotations=[Annotation(
                 type_qname="hal_pkg::extern_type_s",
-                values={"c_name": "std_rv_e", "n": 3, "on": True,
+                values={"c_name": "result_e", "n": 3, "on": True,
                         "mode": AnnotationEnum("hal_pkg::mode_e", "M1", 5),
                         "list": [1, 2], "none": None},
                 loc=Loc(file="hal.pss", line=4, pos=3))])
@@ -169,6 +169,6 @@ class TestAnnotationRoundTrip:
         ann = result.annotations[0]
         assert isinstance(ann, Annotation)
         assert ann.values["mode"] == AnnotationEnum("hal_pkg::mode_e", "M1", 5)
-        assert ann.values["c_name"] == "std_rv_e"
+        assert ann.values["c_name"] == "result_e"
         assert ann.values["on"] is True and ann.values["none"] is None
         assert ann.loc == Loc(file="hal.pss", line=4, pos=3)
