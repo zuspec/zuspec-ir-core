@@ -153,14 +153,14 @@ class TestAnnotationRoundTrip:
         original = DataTypeEnum(
             name="result_e", items={"OK": 0, "ERR": 1},
             annotations=[Annotation(
-                type_qname="hal_pkg::extern_type_s",
+                type_qname="gen_pkg::ext_s",
                 values={"c_name": "result_e", "n": 3, "on": True,
-                        "mode": AnnotationEnum("hal_pkg::mode_e", "M1", 5),
+                        "mode": AnnotationEnum("gen_pkg::mode_e", "M1", 5),
                         "list": [1, 2], "none": None},
-                loc=Loc(file="hal.pss", line=4, pos=3))])
+                loc=Loc(file="gen.pss", line=4, pos=3))])
         text = IRSerializer().serialize(original, _make_layer())
         data = yaml.safe_load(text)
-        assert data["annotations"][0]["type_qname"] == "hal_pkg::extern_type_s"
+        assert data["annotations"][0]["type_qname"] == "gen_pkg::ext_s"
         deser = IRDeserializer()
         for c in (DataTypeEnum, Annotation, AnnotationEnum, Loc):
             deser.register(c.__name__, c)
@@ -168,7 +168,7 @@ class TestAnnotationRoundTrip:
         assert isinstance(result, DataTypeEnum)
         ann = result.annotations[0]
         assert isinstance(ann, Annotation)
-        assert ann.values["mode"] == AnnotationEnum("hal_pkg::mode_e", "M1", 5)
+        assert ann.values["mode"] == AnnotationEnum("gen_pkg::mode_e", "M1", 5)
         assert ann.values["c_name"] == "result_e"
         assert ann.values["on"] is True and ann.values["none"] is None
-        assert ann.loc == Loc(file="hal.pss", line=4, pos=3)
+        assert ann.loc == Loc(file="gen.pss", line=4, pos=3)

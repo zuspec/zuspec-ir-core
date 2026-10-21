@@ -31,10 +31,11 @@ class Annotation(object):
     """A source annotation (PSS 7.13) on the node that carries it.
 
     ``type_qname`` is the annotation type as the front end resolved it
-    (``hal_pkg::hal_s``), never as the source spelled it. ``values`` holds
+    (``pkg::ann_s``), never as the source spelled it. ``values`` holds
     every field of the type, defaults included, by name: a ``str``, ``int``,
     ``bool``, :class:`AnnotationEnum`, ``None`` (did not fold, or unset with
-    no default), or a list or dict of those.
+    no default), or a list or dict of those. ``loc`` is where the annotation
+    is written.
 
     A plain dataclass, not a :class:`Base`: an annotation is metadata about a
     node, not part of the IR a visitor walks, so ``visitDefault`` passes over
@@ -103,8 +104,8 @@ class Base(BaseP):
     #: excluded from ``==`` and ``repr`` so that annotating a model never
     #: changes whether two IR nodes compare equal.
     #:
-    #: Not to be confused with :attr:`Arg.annotation`, which is an
-    #: argument's *type*.
+    #: Not to be confused with :attr:`Arg.annotation` (or
+    #: ``StmtAnnAssign.annotation``), which is a *type*.
     annotations : List[Annotation] = dc.field(
         default_factory=list, compare=False, repr=False)
 
