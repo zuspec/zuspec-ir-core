@@ -22,7 +22,7 @@
 # 0.1.0 rather than 0.0.1: PyPI already holds run-id-stamped dev releases of
 # sibling packages numbered 0.0.1.<run-id>, which sort ABOVE a bare 0.0.1.
 # The whole estate moves to 0.1.0 so that a real release outranks that stream.
-BASE="0.2.0"
+BASE="0.3.0"
 SUFFIX=""
 VERSION="%s%s" % (BASE, SUFFIX)
 version=VERSION
