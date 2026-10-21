@@ -2,7 +2,7 @@ from __future__ import annotations
 import dataclasses as dc
 import inspect
 import logging
-from typing import TYPE_CHECKING, Iterable, Protocol, Self, cast, runtime_checkable, Optional, Any, Type
+from typing import TYPE_CHECKING, Dict, Iterable, List, Protocol, Self, cast, runtime_checkable, Optional, Any, Type
 
 if TYPE_CHECKING:
     from .provenance import Provenance
@@ -16,6 +16,34 @@ class Loc(object):
     line : int = dc.field()
     pos : int = dc.field()
     ref : Optional[Any] = dc.field(default=None)
+
+@dc.dataclass
+class AnnotationEnum(object):
+    """An enum item as an annotation value: its enum's qualified name, the
+    item's name, and its integer value when that is known."""
+    enum : str = dc.field()
+    item : str = dc.field()
+    value : Optional[int] = dc.field(default=None)
+
+
+@dc.dataclass
+class Annotation(object):
+    """A source annotation (PSS 7.13) on the node that carries it.
+
+    ``type_qname`` is the annotation type as the front end resolved it
+    (``hal_pkg::hal_s``), never as the source spelled it. ``values`` holds
+    every field of the type, defaults included, by name: a ``str``, ``int``,
+    ``bool``, :class:`AnnotationEnum`, ``None`` (did not fold, or unset with
+    no default), or a list or dict of those.
+
+    A plain dataclass, not a :class:`Base`: an annotation is metadata about a
+    node, not part of the IR a visitor walks, so ``visitDefault`` passes over
+    it and no visitor needs a ``visitAnnotation``.
+    """
+    type_qname : str = dc.field()
+    values : Dict[str, Any] = dc.field(default_factory=dict)
+    loc : Optional[Loc] = dc.field(default=None)
+
 
 @runtime_checkable
 class BaseP(Protocol):
@@ -69,6 +97,16 @@ class Base(BaseP):
     #: Declared on the root for the same reason ``doc`` is: any node kind may be
     #: synthesized, and a consumer should be able to ask without knowing which.
     provenance : Optional["Provenance"] = dc.field(default=None)
+
+    #: The source annotations on the declaration this node was translated
+    #: from (PSS 7.13), in source order. Metadata for back ends and plug-ins:
+    #: excluded from ``==`` and ``repr`` so that annotating a model never
+    #: changes whether two IR nodes compare equal.
+    #:
+    #: Not to be confused with :attr:`Arg.annotation`, which is an
+    #: argument's *type*.
+    annotations : List[Annotation] = dc.field(
+        default_factory=list, compare=False, repr=False)
 
     def visitDefault(self, v : Visitor, cls : Optional[Type] = None):
         _log.debug("visitDefault %s %s" % (

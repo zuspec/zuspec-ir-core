@@ -12,6 +12,8 @@ class Alias(Base):
 @dc.dataclass(kw_only=True)
 class Arg(Base):
     arg: str = dc.field()
+    #: The argument's type as written: a Python-style type annotation, not a
+    #: PSS annotation (those are ``Base.annotations``).
     annotation: Optional[Expr] = dc.field(default=None)
     #: The argument's type, when the front end resolved one (``annotation``
     #: holds the type as written, if anything).

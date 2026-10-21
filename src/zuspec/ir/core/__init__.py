@@ -17,7 +17,7 @@ def profile(modname, super=None):
     ProfileRgy.register_profile(modname, super)
 
 
-from .base import Base, BaseP, Loc
+from .base import Annotation, AnnotationEnum, Base, BaseP, Loc
 from .context import Context
 from .visitor import Visitor
 from .json_converter import JsonConverter
@@ -175,7 +175,7 @@ from .abstraction_field_ir import AbstractionFieldIR
 from .registry import LoweringRegistry, global_registry
 
 __all__ = [
-    "profile","Base","BaseP","Loc","Visitor","JsonConverter","json_converter",
+    "profile","Annotation","AnnotationEnum","Base","BaseP","Loc","Visitor","JsonConverter","json_converter",
     "Bind","BindSet","Field","FieldInOut","FieldKind","SignalDirection",
     "RandKind","FieldMetaKind","ClaimMode","Pool","PoolBind",
     "DataType","DataTypeInt","DataTypeUptr","DataTypeStruct","DataTypeClass","DataTypeAction","DataTypeComponent","DataTypeExtern",
