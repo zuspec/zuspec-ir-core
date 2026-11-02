@@ -1,0 +1,36 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "zuspec.ir-bundle.v1",
+ "title": "Zuspec IR bundle manifest (<name>.zir/manifest.json)",
+ "type": "object",
+ "required": [
+  "format",
+  "version",
+  "anchors",
+  "overlays"
+ ],
+ "additionalProperties": false,
+ "properties": {
+  "format": {
+   "const": "zuspec.ir-bundle"
+  },
+  "version": {
+   "const": 1
+  },
+  "anchors": {
+   "type": "string"
+  },
+  "overlays": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "model": {
+   "type": [
+    "string",
+    "null"
+   ]
+  }
+ }
+}

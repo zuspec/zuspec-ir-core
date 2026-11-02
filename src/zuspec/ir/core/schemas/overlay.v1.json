@@ -1,0 +1,118 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "zuspec.overlay.v1",
+ "title": "Zuspec overlay: one engine run's facts on anchors (docs/results.md)",
+ "type": "object",
+ "required": [
+  "format",
+  "version",
+  "header",
+  "facts"
+ ],
+ "additionalProperties": false,
+ "properties": {
+  "format": {
+   "const": "zuspec.overlay"
+  },
+  "version": {
+   "const": 1
+  },
+  "header": {
+   "type": "object",
+   "required": [
+    "engine",
+    "overlay_id",
+    "scope_hashes"
+   ],
+   "additionalProperties": false,
+   "properties": {
+    "engine": {
+     "type": "string"
+    },
+    "engine_version": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "delay_model": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "constraints": {
+     "type": "object"
+    },
+    "constraints_hash": {
+     "type": "string"
+    },
+    "command": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "created": {
+     "type": "string"
+    },
+    "scope_hashes": {
+     "type": "object",
+     "additionalProperties": {
+      "type": "string"
+     }
+    },
+    "coverage": {
+     "type": "object"
+    },
+    "artifacts": {
+     "type": "object",
+     "additionalProperties": {
+      "type": "string"
+     }
+    },
+    "overlay_id": {
+     "type": "string"
+    }
+   }
+  },
+  "facts": {
+   "type": "object",
+   "propertyNames": {
+    "pattern": "^[a-z0-9_]+(\\.[a-z0-9_]+)+$"
+   },
+   "additionalProperties": {
+    "type": "object",
+    "required": [
+     "anchor",
+     "value",
+     "quality"
+    ],
+    "additionalProperties": false,
+    "properties": {
+     "anchor": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "value": {
+      "type": "array"
+     },
+     "quality": {
+      "type": "array",
+      "items": {
+       "enum": [
+        "exact",
+        "merged",
+        "derived",
+        "partial",
+        "unmapped"
+       ]
+      }
+     }
+    }
+   }
+  }
+ }
+}

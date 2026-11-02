@@ -1,8 +1,9 @@
 from __future__ import annotations
 import dataclasses as dc
 import inspect
+import os
 import logging
-from typing import TYPE_CHECKING, Dict, Iterable, List, Protocol, Self, cast, runtime_checkable, Optional, Any, Type
+from typing import TYPE_CHECKING, Dict, Iterable, List, Protocol, Self, Tuple, cast, runtime_checkable, Optional, Any, Type
 
 if TYPE_CHECKING:
     from .provenance import Provenance
@@ -12,10 +13,18 @@ _log = logging.getLogger("zuspec.ir.Base")
 
 @dc.dataclass
 class Loc(object):
+    """A source position. ``line`` and ``pos`` (the column) are both 1-based,
+    whatever the front end (``docs/anchors.md`` §6)."""
     file : Optional[str] = dc.field()
     line : int = dc.field()
     pos : int = dc.field()
     ref : Optional[Any] = dc.field(default=None)
+
+    def key(self) -> Tuple[Optional[str], int, int]:
+        """``(file, line, column)`` with *file* made absolute: the form engine
+        adapters use to find the IR node an engine's source position names."""
+        f = os.path.abspath(self.file) if self.file else None
+        return (f, self.line, self.pos)
 
 @dc.dataclass
 class AnnotationEnum(object):
@@ -108,6 +117,12 @@ class Base(BaseP):
     #: ``StmtAnnAssign.annotation``), which is a *type*.
     annotations : List[Annotation] = dc.field(
         default_factory=list, compare=False, repr=False)
+
+    #: The node's stable identity (``docs/anchors.md``), set by
+    #: :func:`~zuspec.ir.core.anchor.assign_anchors`. Engine results are
+    #: recorded against it. Like ``annotations``, excluded from ``==`` and
+    #: ``repr``: anchoring a model never changes whether two nodes compare equal.
+    anchor : Optional[str] = dc.field(default=None, compare=False, repr=False)
 
     def visitDefault(self, v : Visitor, cls : Optional[Type] = None):
         _log.debug("visitDefault %s %s" % (

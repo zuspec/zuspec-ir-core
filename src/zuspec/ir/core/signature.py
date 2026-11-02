@@ -13,7 +13,8 @@ import json
 from typing import Any, Dict, List, Optional
 
 from .base import Base
-from .data_type import DataType, DataTypeInt
+from .data_type import DataType, DataTypeArray, DataTypeInt, DataTypeStruct
+from .fields import Field
 
 
 @dc.dataclass(kw_only=True)
@@ -30,6 +31,12 @@ class ChannelSignature(Base):
     #: The payload type as the source language spells it (e.g. an SV typedef),
     #: for generated transactors and glue; None when unknown.
     payload_sv_type: Optional[str] = dc.field(default=None)
+    #: Pipeline stage of the block's operation on this channel; None when
+    #: unknown or not pipelined.
+    stage: Optional[int] = dc.field(default=None)
+    #: I/O flopping of the channel's ports: "none", "flop", "skid" or
+    #: "zero_latency" (XLS's FlopKind); None when unknown.
+    flop_kind: Optional[str] = dc.field(default=None)
 
 
 @dc.dataclass(kw_only=True)
@@ -63,19 +70,35 @@ class BlockSignature(Base):
 # ---------------------------------------------------------------------------
 
 SIGNATURE_FORMAT = "zuspec.block-signature"
-SIGNATURE_VERSION = 1
+SIGNATURE_VERSION = 2
+#: Versions this reader accepts. Version 2 added channel ``stage`` and
+#: ``flop_kind`` and struct and array payloads; a version-1 file reads as is.
+_READABLE_VERSIONS = (1, 2)
 
 
 def _payload_to_json(t: DataType) -> Dict[str, Any]:
     if isinstance(t, DataTypeInt):
         return {"kind": "int", "bits": t.bits, "signed": t.signed}
+    if isinstance(t, DataTypeArray):
+        return {"kind": "array", "size": t.size, "element": _payload_to_json(t.element_type)}
+    if isinstance(t, DataTypeStruct):
+        return {"kind": "struct", "name": t.name,
+                "fields": [{"name": f.name, "type": _payload_to_json(f.datatype)}
+                           for f in t.fields]}
     raise TypeError(f"no file form for payload type {type(t).__name__}")
 
 
 def _payload_from_json(d: Dict[str, Any]) -> DataType:
-    if d.get("kind") == "int":
+    kind = d.get("kind")
+    if kind == "int":
         return DataTypeInt(bits=int(d["bits"]), signed=bool(d.get("signed", False)))
-    raise ValueError(f"unknown payload kind {d.get('kind')!r}")
+    if kind == "array":
+        return DataTypeArray(size=int(d["size"]), element_type=_payload_from_json(d["element"]))
+    if kind == "struct":
+        return DataTypeStruct(name=d.get("name"), super=None,
+                              fields=[Field(name=f["name"], datatype=_payload_from_json(f["type"]))
+                                      for f in d.get("fields", [])])
+    raise ValueError(f"unknown payload kind {kind!r}")
 
 
 def signature_to_json(sig: BlockSignature) -> Dict[str, Any]:
@@ -87,16 +110,17 @@ def signature_to_json(sig: BlockSignature) -> Dict[str, Any]:
         "channels": [{"name": c.name, "direction": c.direction,
                       "flow_control": c.flow_control, "ports": dict(c.ports),
                       "payload": _payload_to_json(c.payload),
-                      "payload_sv_type": c.payload_sv_type} for c in sig.channels],
+                      "payload_sv_type": c.payload_sv_type,
+                      "stage": c.stage, "flop_kind": c.flop_kind} for c in sig.channels],
     }
 
 
 def signature_from_json(d: Dict[str, Any]) -> BlockSignature:
     if d.get("format") != SIGNATURE_FORMAT:
         raise ValueError(f"not a block signature (format={d.get('format')!r})")
-    if d.get("version") != SIGNATURE_VERSION:
+    if d.get("version") not in _READABLE_VERSIONS:
         raise ValueError(f"block signature version {d.get('version')!r}; "
-                         f"this reader knows {SIGNATURE_VERSION}")
+                         f"this reader knows {list(_READABLE_VERSIONS)}")
     return BlockSignature(
         name=d["name"], engine=d.get("engine"), sources=list(d.get("sources", [])),
         clock=d.get("clock"), reset=d.get("reset"),
@@ -106,7 +130,8 @@ def signature_from_json(d: Dict[str, Any]) -> BlockSignature:
                                    flow_control=c.get("flow_control", "ready_valid"),
                                    ports=dict(c.get("ports", {})),
                                    payload=_payload_from_json(c["payload"]),
-                                   payload_sv_type=c.get("payload_sv_type"))
+                                   payload_sv_type=c.get("payload_sv_type"),
+                                   stage=c.get("stage"), flop_kind=c.get("flop_kind"))
                   for c in d.get("channels", [])])
 
 

@@ -1,0 +1,80 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "zuspec.anchor-table.v2",
+ "title": "Zuspec anchor table (docs/anchors.md)",
+ "type": "object",
+ "required": [
+  "format",
+  "version",
+  "scope_hashes",
+  "anchors"
+ ],
+ "additionalProperties": false,
+ "properties": {
+  "format": {
+   "const": "zuspec.anchor-table"
+  },
+  "version": {
+   "const": 2
+  },
+  "scope_hashes": {
+   "type": "object",
+   "additionalProperties": {
+    "type": "string",
+    "pattern": "^[0-9a-f]{16}$"
+   }
+  },
+  "anchors": {
+   "type": "object",
+   "propertyNames": {
+    "type": "string",
+    "pattern": "^[\\x21-\\x7e]+$"
+   },
+   "additionalProperties": {
+    "type": "object",
+    "required": [
+     "kind",
+     "scope"
+    ],
+    "additionalProperties": false,
+    "properties": {
+     "kind": {
+      "enum": [
+       "type",
+       "member",
+       "stmt",
+       "expr"
+      ]
+     },
+     "scope": {
+      "type": "string"
+     },
+     "loc": {
+      "type": "array",
+      "prefixItems": [
+       {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       {
+        "type": "integer",
+        "minimum": 0
+       },
+       {
+        "type": "integer",
+        "minimum": 0
+       }
+      ],
+      "minItems": 3,
+      "maxItems": 3
+     },
+     "source_name": {
+      "type": "string"
+     }
+    }
+   }
+  }
+ }
+}

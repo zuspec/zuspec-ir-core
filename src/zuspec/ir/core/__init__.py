@@ -52,6 +52,8 @@ from .domain_node import DomainNode
 from .connection import Connection, Signal, Bundle, MethodInterface, PortConnection, ModuleInstance
 from .signature import (BlockSignature, ChannelSignature, load_signature, save_signature,
                         signature_from_json, signature_to_json)
+from .anchor import (AnchorEntry, AnchorTable, assign_anchors, mark_synthesized,
+                     synthesized_reason)
 
 # Re-export data model types
 from .fields import Bind, BindSet, Field, FieldInOut, FieldKind, SignalDirection, RandKind, FieldMetaKind, ClaimMode, Pool, PoolBind
@@ -175,6 +177,7 @@ from .abstraction_field_ir import AbstractionFieldIR
 from .registry import LoweringRegistry, global_registry
 
 __all__ = [
+    "AnchorEntry", "AnchorTable", "assign_anchors", "mark_synthesized", "synthesized_reason",
     "profile","Annotation","AnnotationEnum","Base","BaseP","Loc","Visitor","JsonConverter","json_converter",
     "Bind","BindSet","Field","FieldInOut","FieldKind","SignalDirection",
     "RandKind","FieldMetaKind","ClaimMode","Pool","PoolBind",
