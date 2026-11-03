@@ -50,7 +50,7 @@ def json_converter(pmod, *args, **kwargs):
 from .provenance import Provenance
 from .domain_node import DomainNode
 from .connection import Connection, Signal, Bundle, MethodInterface, PortConnection, ModuleInstance
-from .signature import (BlockSignature, ChannelSignature, load_signature, save_signature,
+from .signature import (BlockSignature, ChannelSignature, DataPortSignature, load_signature, save_signature,
                         signature_from_json, signature_to_json)
 from .anchor import (AnchorEntry, AnchorTable, assign_anchors, mark_synthesized,
                      synthesized_reason)
@@ -174,7 +174,8 @@ from .interfaces import (
     CSimEmittableInterface,
 )
 from .abstraction_field_ir import AbstractionFieldIR
-from .registry import LoweringRegistry, global_registry
+from .registry import (LoweringRegistry, global_registry, ExternalEntry, Recognized,
+                       RecognitionError, PluginLoadError)
 
 __all__ = [
     "AnchorEntry", "AnchorTable", "assign_anchors", "mark_synthesized", "synthesized_reason",
@@ -253,8 +254,9 @@ __all__ = [
     "Lowerable","ElaboratableInterface","SVEmittableInterface",
     "SVAEmittableInterface","CSimEmittableInterface",
     "AbstractionFieldIR","LoweringRegistry","global_registry",
+    "ExternalEntry","Recognized","RecognitionError","PluginLoadError",
     # Engine-neutral block signature
-    "BlockSignature","ChannelSignature","signature_to_json","signature_from_json",
+    "BlockSignature","ChannelSignature","DataPortSignature","signature_to_json","signature_from_json",
     "save_signature","load_signature",
 ]
 

@@ -9,7 +9,7 @@ SCHEMAS = {
     "zuspec.anchor-table": "anchor-table.v2.json",
     "zuspec.overlay": "overlay.v1.json",
     "zuspec.ir-bundle": "ir-bundle.v1.json",
-    "zuspec.block-signature": "block-signature.v2.json",
+    "zuspec.block-signature": "block-signature.v3.json",
 }
 
 

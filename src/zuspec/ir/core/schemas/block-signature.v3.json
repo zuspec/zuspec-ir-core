@@ -1,0 +1,188 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "zuspec.block-signature.v3",
+ "title": "Zuspec block signature (v1 and v2 are read too: v1 has no stage/flop_kind; neither has kind/data_ports/valid_ports)",
+ "type": "object",
+ "required": [
+  "format",
+  "version",
+  "name"
+ ],
+ "additionalProperties": false,
+ "properties": {
+  "format": {
+   "const": "zuspec.block-signature"
+  },
+  "version": {
+   "enum": [
+    1,
+    2,
+    3
+   ]
+  },
+  "name": {
+   "type": "string"
+  },
+  "kind": {
+   "enum": [
+    "proc",
+    "function"
+   ]
+  },
+  "engine": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "sources": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "clock": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "reset": {
+   "type": [
+    "string",
+    "null"
+   ]
+  },
+  "reset_active_low": {
+   "type": "boolean"
+  },
+  "latency": {
+   "type": [
+    "integer",
+    "null"
+   ]
+  },
+  "initiation_interval": {
+   "type": [
+    "integer",
+    "null"
+   ]
+  },
+  "channels": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "required": [
+     "name",
+     "direction",
+     "payload"
+    ],
+    "additionalProperties": false,
+    "properties": {
+     "name": {
+      "type": "string"
+     },
+     "direction": {
+      "enum": [
+       "in",
+       "out"
+      ]
+     },
+     "flow_control": {
+      "enum": [
+       "ready_valid",
+       "valid",
+       "none"
+      ]
+     },
+     "ports": {
+      "type": "object",
+      "propertyNames": {
+       "enum": [
+        "data",
+        "valid",
+        "ready"
+       ]
+      },
+      "additionalProperties": {
+       "type": "string"
+      }
+     },
+     "payload": {
+      "$comment": "A DataType as signature JSON: int, struct or array (signature.py _payload_to_json).",
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "payload_sv_type": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "stage": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "flop_kind": {
+      "enum": [
+       "none",
+       "flop",
+       "skid",
+       "zero_latency",
+       null
+      ]
+     }
+    }
+   }
+  },
+  "data_ports": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "required": [
+     "name",
+     "direction",
+     "type"
+    ],
+    "additionalProperties": false,
+    "properties": {
+     "name": {
+      "type": "string"
+     },
+     "direction": {
+      "enum": [
+       "in",
+       "out"
+      ]
+     },
+     "type": {
+      "$comment": "A DataType as signature JSON, as for a channel payload.",
+      "type": "object"
+     },
+     "sv_type": {
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    }
+   }
+  },
+  "valid_ports": {
+   "type": "object",
+   "propertyNames": {
+    "enum": [
+     "input_valid",
+     "output_valid"
+    ]
+   },
+   "additionalProperties": {
+    "type": "string"
+   }
+  }
+ }
+}

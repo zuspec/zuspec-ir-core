@@ -40,10 +40,33 @@ class ChannelSignature(Base):
 
 
 @dc.dataclass(kw_only=True)
+class DataPortSignature(Base):
+    """One plain data port of a function block (no handshake of its own)."""
+    name: str = dc.field()
+    #: "in" or "out".
+    direction: str = dc.field()
+    type: DataType = dc.field()
+    #: The type as the source language spells it; None when unknown.
+    sv_type: Optional[str] = dc.field(default=None)
+
+
+#: Block kinds: a proc talks through channels; a function block takes its
+#: arguments on data ports and, when pipelined, qualifies them with the
+#: ``valid_ports`` roles ``input_valid`` and ``output_valid``.
+BLOCK_KINDS = ("proc", "function")
+
+
+@dc.dataclass(kw_only=True)
 class BlockSignature(Base):
     """The RTL-level interface of one block."""
     name: str = dc.field()
+    #: "proc" or "function" (BLOCK_KINDS).
+    kind: str = dc.field(default="proc")
     channels: List[ChannelSignature] = dc.field(default_factory=list)
+    #: A function block's argument and result ports.
+    data_ports: List[DataPortSignature] = dc.field(default_factory=list)
+    #: A function block's valid pins by role: "input_valid", "output_valid".
+    valid_ports: Dict[str, str] = dc.field(default_factory=dict)
     clock: Optional[str] = dc.field(default=None)
     reset: Optional[str] = dc.field(default=None)
     reset_active_low: bool = dc.field(default=False)
@@ -62,6 +85,12 @@ class BlockSignature(Base):
                 return c
         raise KeyError(name)
 
+    def data_port(self, name: str) -> DataPortSignature:
+        for p in self.data_ports:
+            if p.name == name:
+                return p
+        raise KeyError(name)
+
 
 # ---------------------------------------------------------------------------
 # File form (JSON). A block reaches the integration step as a signature file,
@@ -70,10 +99,13 @@ class BlockSignature(Base):
 # ---------------------------------------------------------------------------
 
 SIGNATURE_FORMAT = "zuspec.block-signature"
-SIGNATURE_VERSION = 2
+SIGNATURE_VERSION = 3
 #: Versions this reader accepts. Version 2 added channel ``stage`` and
-#: ``flop_kind`` and struct and array payloads; a version-1 file reads as is.
-_READABLE_VERSIONS = (1, 2)
+#: ``flop_kind`` and struct and array payloads. Version 3 added ``kind``,
+#: ``data_ports`` and ``valid_ports`` for function blocks; a version-2 reader
+#: would see a function block as having no pins, hence the bump. Version-1
+#: and -2 files read as procs.
+_READABLE_VERSIONS = (1, 2, 3)
 
 
 def _payload_to_json(t: DataType) -> Dict[str, Any]:
@@ -104,7 +136,8 @@ def _payload_from_json(d: Dict[str, Any]) -> DataType:
 def signature_to_json(sig: BlockSignature) -> Dict[str, Any]:
     return {
         "format": SIGNATURE_FORMAT, "version": SIGNATURE_VERSION,
-        "name": sig.name, "engine": sig.engine, "sources": list(sig.sources),
+        "name": sig.name, "kind": sig.kind,
+        "engine": sig.engine, "sources": list(sig.sources),
         "clock": sig.clock, "reset": sig.reset, "reset_active_low": sig.reset_active_low,
         "latency": sig.latency, "initiation_interval": sig.initiation_interval,
         "channels": [{"name": c.name, "direction": c.direction,
@@ -112,6 +145,10 @@ def signature_to_json(sig: BlockSignature) -> Dict[str, Any]:
                       "payload": _payload_to_json(c.payload),
                       "payload_sv_type": c.payload_sv_type,
                       "stage": c.stage, "flop_kind": c.flop_kind} for c in sig.channels],
+        "data_ports": [{"name": p.name, "direction": p.direction,
+                        "type": _payload_to_json(p.type), "sv_type": p.sv_type}
+                       for p in sig.data_ports],
+        "valid_ports": dict(sig.valid_ports),
     }
 
 
@@ -121,8 +158,12 @@ def signature_from_json(d: Dict[str, Any]) -> BlockSignature:
     if d.get("version") not in _READABLE_VERSIONS:
         raise ValueError(f"block signature version {d.get('version')!r}; "
                          f"this reader knows {list(_READABLE_VERSIONS)}")
+    kind = d.get("kind", "proc")
+    if kind not in BLOCK_KINDS:
+        raise ValueError(f"block signature kind {kind!r}; expected one of {list(BLOCK_KINDS)}")
     return BlockSignature(
-        name=d["name"], engine=d.get("engine"), sources=list(d.get("sources", [])),
+        name=d["name"], kind=kind,
+        engine=d.get("engine"), sources=list(d.get("sources", [])),
         clock=d.get("clock"), reset=d.get("reset"),
         reset_active_low=bool(d.get("reset_active_low", False)),
         latency=d.get("latency"), initiation_interval=d.get("initiation_interval"),
@@ -132,7 +173,12 @@ def signature_from_json(d: Dict[str, Any]) -> BlockSignature:
                                    payload=_payload_from_json(c["payload"]),
                                    payload_sv_type=c.get("payload_sv_type"),
                                    stage=c.get("stage"), flop_kind=c.get("flop_kind"))
-                  for c in d.get("channels", [])])
+                  for c in d.get("channels", [])],
+        data_ports=[DataPortSignature(name=p["name"], direction=p["direction"],
+                                      type=_payload_from_json(p["type"]),
+                                      sv_type=p.get("sv_type"))
+                    for p in d.get("data_ports", [])],
+        valid_ports=dict(d.get("valid_ports", {})))
 
 
 def save_signature(sig: BlockSignature, path: str) -> None:

@@ -33,9 +33,24 @@ Each entry point is expected to be a callable that accepts one argument — the
 :class:`LoweringRegistry` singleton — and calls
 :meth:`~LoweringRegistry.attach_external_model` or
 :meth:`~LoweringRegistry.register` as needed.
+
+3. **Name-keyed external entry** — a class written in another language (an SV
+   class, say) that a front end recognizes by its generic name and parameters.
+   Use :meth:`LoweringRegistry.register_external` and
+   :meth:`LoweringRegistry.lookup`. Each entry declares the parameters it
+   accepts; a lookup with an unknown parameter, or a value the entry does not
+   accept, raises :class:`RecognitionError` rather than silently falling back.
+   Targets add ``xls``, ``native`` and ``extern`` to the four above.
+
+A plugin that fails to load does not break a run that uses only the
+class-keyed API. It is recorded in :attr:`LoweringRegistry.plugin_errors`, and
+:meth:`LoweringRegistry.lookup` raises :class:`PluginLoadError` while any is
+recorded: a recognized class whose plugin failed must not lower as if it were
+unknown.
 """
 
-from typing import Any, Dict, Optional
+import dataclasses as _dc
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from .interfaces import (
     ElaboratableInterface,
@@ -45,6 +60,63 @@ from .interfaces import (
 )
 
 _VALID_TARGETS = frozenset({"sv", "fv", "csim", "elab"})
+#: Targets a name-keyed entry may use.
+EXTERNAL_TARGETS = _VALID_TARGETS | frozenset({"xls", "native", "extern"})
+
+
+class RecognitionError(ValueError):
+    """A recognized class's parameters are not ones its entry accepts."""
+
+
+class PluginLoadError(RuntimeError):
+    """A ``zuspec.lowering`` plugin failed to load."""
+
+
+@_dc.dataclass(frozen=True)
+class ExternalEntry:
+    """A name-keyed lowering (pattern 3).
+
+    ``params`` maps each parameter the entry accepts to what it accepts:
+    a Python type (``int``, ``str``: any value of it) or a collection of the
+    values allowed. ``lowering`` is target-specific; the registry only stores it.
+    """
+    name: str
+    target: str
+    params: Mapping[str, Any]
+    lowering: Any
+    origin: str = ""
+
+    def check(self, params: Mapping[str, Any]) -> Dict[str, Any]:
+        """*params*, validated against :attr:`params`."""
+        out: Dict[str, Any] = {}
+        for k, v in params.items():
+            if k not in self.params:
+                raise RecognitionError(
+                    f"{self.name}: parameter {k!r} is not one its {self.target} lowering "
+                    f"takes (it takes {sorted(self.params)})")
+            want = self.params[k]
+            if isinstance(want, type):
+                if want is int and isinstance(v, bool) or not isinstance(v, want):
+                    raise RecognitionError(
+                        f"{self.name}: parameter {k}={v!r} is not a {want.__name__}")
+            elif v not in want:
+                raise RecognitionError(
+                    f"{self.name}: {k}={v!r} has no {self.target} lowering "
+                    f"(supported: {', '.join(map(str, want))})")
+            out[k] = v
+        return out
+
+
+@_dc.dataclass(frozen=True)
+class Recognized:
+    """What :meth:`LoweringRegistry.lookup` returns: the entry and the
+    validated parameters."""
+    entry: ExternalEntry
+    params: Dict[str, Any]
+
+    @property
+    def lowering(self) -> Any:
+        return self.entry.lowering
 
 
 class LoweringRegistry:
@@ -66,6 +138,11 @@ class LoweringRegistry:
         self._fv_cache:   Dict[type, Any] = {}
         self._csim_cache: Dict[type, Any] = {}
         self._elab_cache: Dict[type, Any] = {}
+
+        # Name-keyed external entries: (name, target) → entry
+        self._external: Dict[Tuple[str, str], ExternalEntry] = {}
+        #: (entry-point name, exception) for each plugin that failed to load
+        self.plugin_errors: List[Tuple[str, BaseException]] = []
 
     # ------------------------------------------------------------------
     # Registration
@@ -136,6 +213,51 @@ class LoweringRegistry:
         elif target == "elab":
             self._elab_models[name] = model
             self._elab_cache.pop(cls, None)
+
+    def register_external(
+        self,
+        name: str,
+        params: Mapping[str, Any],
+        target: str,
+        lowering: Any,
+        *,
+        origin: str = "",
+        replace: bool = False,
+    ) -> ExternalEntry:
+        """Register a lowering for the class named *name* (its generic name,
+        without parameters) on *target*. *params* is what each parameter may
+        be (see :class:`ExternalEntry`). Registering the same (name, target)
+        twice is an error unless *replace*."""
+        if target not in EXTERNAL_TARGETS:
+            raise ValueError(f"Unknown target {target!r}. "
+                             f"Must be one of {sorted(EXTERNAL_TARGETS)}.")
+        key = (name, target)
+        if key in self._external and not replace:
+            prev = self._external[key]
+            raise ValueError(f"{name!r} already has a {target} lowering"
+                             + (f" (from {prev.origin})" if prev.origin else ""))
+        e = ExternalEntry(name, target, dict(params), lowering, origin)
+        self._external[key] = e
+        return e
+
+    def lookup(self, name: str, params: Mapping[str, Any],
+               target: str) -> Optional[Recognized]:
+        """The entry for *name* on *target*, with *params* checked, or None
+        when there is none. Raises :class:`RecognitionError` for parameters
+        the entry does not accept, and :class:`PluginLoadError` while a
+        plugin failure is recorded."""
+        if self.plugin_errors:
+            raise PluginLoadError("; ".join(f"{n}: {type(e).__name__}: {e}"
+                                            for n, e in self.plugin_errors))
+        e = self._external.get((name, target))
+        if e is None:
+            return None
+        return Recognized(e, e.check(params))
+
+    def externals(self, target: Optional[str] = None) -> List[ExternalEntry]:
+        """Every name-keyed entry (on *target*, if given), by name."""
+        return sorted((e for (n, t), e in self._external.items()
+                       if target is None or t == target), key=lambda e: (e.name, e.target))
 
     # ------------------------------------------------------------------
     # Lookup
@@ -219,8 +341,10 @@ def _load_plugins(registry: LoweringRegistry) -> None:
         try:
             fn = ep.load()
             fn(registry)
-        except Exception:
-            pass  # plugin failures must not break the synthesis run
+        except Exception as e:
+            # A run that never looks a name up is not broken by it; lookup()
+            # reports it (see the module docstring).
+            registry.plugin_errors.append((ep.name, e))
 
 
 def global_registry() -> LoweringRegistry:

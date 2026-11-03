@@ -13,7 +13,7 @@ from zuspec.ir.core.schemas import SCHEMAS, schema
 
 from test_anchor import component
 from test_results import overlay_for
-from test_signature_file import _sig
+from test_signature_file import _fn_sig, _sig
 
 
 def check(d):
@@ -37,6 +37,7 @@ def test_written_files_validate(tmp_path):
     sig = _sig()
     sig.channels[0].stage, sig.channels[0].flop_kind = 0, "flop"
     check(ir.signature_to_json(sig))
+    check(ir.signature_to_json(_fn_sig()))
 
 
 def test_schemas_reject_wrong_versions_and_qualities():

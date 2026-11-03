@@ -7,7 +7,7 @@ Zuspec writes four JSON formats. Each file carries `format` and `version` fields
 | `zuspec.anchor-table` | 2 | `anchor-table.v2.json` | `AnchorTable.save` | [anchors.md](anchors.md) |
 | `zuspec.overlay` | 1 | `overlay.v1.json` | `Overlay.save` | [results.md](results.md) |
 | `zuspec.ir-bundle` | 1 | `ir-bundle.v1.json` (the manifest) | `write_bundle` | [results.md](results.md) |
-| `zuspec.block-signature` | 2 (reads 1, 2) | `block-signature.v2.json` | `save_signature` | `signature.py` |
+| `zuspec.block-signature` | 3 (reads 1–3) | `block-signature.v3.json` | `save_signature` | `signature.py` |
 
 ## Anchor table (`anchors.json`)
 
@@ -41,7 +41,12 @@ A block's ports and channels as integration sees them. Version 2 added two field
 - `stage`: the pipeline stage of the block's operation on the channel
 - `flop_kind`: one of `none`, `flop`, `skid`, `zero_latency`
 
-Version 1 files are still read.
+Version 3 (Phase 1, pin parity) describes function blocks too:
+- `kind`: `proc` (talks through channels) or `function` (an XLS function block: argument and result ports with no handshake of their own)
+- `data_ports`: a function block's ports, each with `name`, `direction`, `type` (a payload type) and `sv_type`
+- `valid_ports`: a function block's valid pins by role, `input_valid` and `output_valid`, when it is pipelined
+
+It is a version bump rather than an added field because a version-2 reader would see a function block as having no pins at all. Version 1 and 2 files are still read, as procs.
 
 ## Versioning policy
 
