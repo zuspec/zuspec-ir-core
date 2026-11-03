@@ -40,7 +40,9 @@ Each entry point is expected to be a callable that accepts one argument — the
    :meth:`LoweringRegistry.lookup`. Each entry declares the parameters it
    accepts; a lookup with an unknown parameter, or a value the entry does not
    accept, raises :class:`RecognitionError` rather than silently falling back.
-   Targets add ``xls``, ``native`` and ``extern`` to the four above.
+   Targets add ``xls``, ``native``, ``extern`` and ``zuspec`` to the four
+   above. A ``zuspec`` lowering builds Zuspec IR (a component) from the
+   parameters, which any backend can then lower.
 
 A plugin that fails to load does not break a run that uses only the
 class-keyed API. It is recorded in :attr:`LoweringRegistry.plugin_errors`, and
@@ -61,7 +63,7 @@ from .interfaces import (
 
 _VALID_TARGETS = frozenset({"sv", "fv", "csim", "elab"})
 #: Targets a name-keyed entry may use.
-EXTERNAL_TARGETS = _VALID_TARGETS | frozenset({"xls", "native", "extern"})
+EXTERNAL_TARGETS = _VALID_TARGETS | frozenset({"xls", "native", "extern", "zuspec"})
 
 
 class RecognitionError(ValueError):

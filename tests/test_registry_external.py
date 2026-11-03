@@ -48,6 +48,16 @@ def test_unknown_target_is_rejected():
         LoweringRegistry().register_external("x", {}, "verilog", lowering=None)
 
 
+def test_zuspec_target_holds_a_factory():
+    """A ``zuspec`` lowering builds Zuspec IR from the parameters; the
+    registry stores it as is."""
+    r = LoweringRegistry()
+    make = lambda params: ("component", params["N"])
+    r.register_external("fw_cam", {"N": int}, "zuspec", lowering=make)
+    hit = r.lookup("fw_cam", {"N": 64}, "zuspec")
+    assert hit.lowering(hit.params) == ("component", 64)
+
+
 def test_externals_lists_by_target():
     r = _reg()
     r.register_external("fw_reg_component", {}, "native", lowering="n")
