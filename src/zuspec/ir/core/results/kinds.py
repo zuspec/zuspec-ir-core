@@ -10,7 +10,7 @@ group; each entry point names a callable that returns a list of
 from __future__ import annotations
 
 import dataclasses as dc
-from typing import Any, Callable, Dict, Iterable, Optional
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 from .fact import QUALITIES, Fact, FactError
 
@@ -46,6 +46,28 @@ def _dict(**fields: Callable[[Any], bool]) -> Callable[[Any], bool]:
 _str = lambda v: isinstance(v, str) and v != ""
 _bool = lambda v: isinstance(v, bool)
 _strs = lambda v: isinstance(v, list) and all(isinstance(x, str) for x in v)
+_num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0
+
+#: Units an ``area.estimate`` may be given in.
+AREA_UNITS = frozenset({"um2", "mm2", "ge", "cells", "luts", "ffs", "brams", "dsps"})
+
+
+def _latency(v: Any) -> bool:
+    """``{src, dst}`` plus either ``fixed`` or ``min`` (and an optional ``max``,
+    absent meaning unbounded)."""
+    if not _dict(src=_str, dst=_str, fixed_=_int(), min_=_int(), max_=_int())(v):
+        return False
+    fixed, lo, hi = v.get("fixed"), v.get("min"), v.get("max")
+    if fixed is not None:
+        return lo is None and hi is None
+    return lo is not None and (hi is None or hi >= lo)
+
+
+def latency_range(v: Dict[str, Any]) -> Tuple[int, Optional[int]]:
+    """``(min, max)`` cycles of an ``iface.latency`` value; max None is unbounded."""
+    if v.get("fixed") is not None:
+        return v["fixed"], v["fixed"]
+    return v["min"], v.get("max")
 
 CORE_KINDS = [
     FactKind("iface.block",
@@ -54,6 +76,25 @@ CORE_KINDS = [
     FactKind("iface.channel_stage", _int(), "Pipeline stage of the block's operation on a channel."),
     FactKind("iface.channel_flop", lambda v: v in ("none", "flop", "skid", "zero_latency"),
              "I/O flopping of a channel's ports."),
+    FactKind("iface.latency", _latency,
+             "Cycles from a value entering at port src to its effect leaving at port dst: "
+             "fixed, or min..max (no max: unbounded)."),
+    FactKind("iface.ii", _dict(port=_str, n=_int(1)),
+             "The port accepts at most one value every n cycles."),
+    FactKind("iface.throughput", lambda v: _dict(port=_str, k=_int(1), n=_int(1))(v)
+             and v["k"] <= v["n"], "The port sustains k values every n cycles."),
+    FactKind("iface.capacity", _dict(src=_str, dst=_str, n=_int()),
+             "Values that can be in flight from src to dst."),
+    FactKind("iface.comb_path", _dict(src=_str, dst=_str),
+             "A combinational path from port src to port dst."),
+    FactKind("iface.stall_coupling", _dict(a=_str, b=_str),
+             "A stall on port a can stall port b."),
+    FactKind("iface.registered", _dict(port=_str), "The port's outputs come from flops."),
+    FactKind("timing.io_delay_ps", _dict(port=_str, ps=_int()),
+             "Delay inside the block between the port and the nearest flop."),
+    FactKind("area.estimate", _dict(value=_num, unit=lambda u: u in AREA_UNITS,
+                                    source_=_str, cond_=_str),
+             "An area figure, with its unit and where it comes from."),
     FactKind("sched.stage", _int(), "Pipeline stage (0-based) an operation is scheduled in."),
     FactKind("sched.stage_count", _int(1), "Number of pipeline stages of a function or process."),
     FactKind("sched.ii", _dict(value=_int(1), reliable=_bool),

@@ -64,7 +64,24 @@ degrade on `partial`/`unmapped` facts, never fail.
 | `rtl.signal` | `{module, name}` |
 | `rtl.register` | `{module, name, width, stage}` |
 
-`area.*` and `sim.*` are reserved; their kinds are defined when a producer exists.
+### Interface facts
+
+What a block's boundary is known to do, without looking inside it. Ports are named in the
+value, so the facts sit on the block's anchor.
+
+| Kind | Value |
+|---|---|
+| `iface.latency` | `{src, dst, fixed}` or `{src, dst, min, max?}` (no `max`: unbounded) |
+| `iface.ii` | `{port, n: int ≥ 1}` |
+| `iface.throughput` | `{port, k, n}`, 1 ≤ k ≤ n: k values every n cycles |
+| `iface.capacity` | `{src, dst, n: int ≥ 0}` |
+| `iface.comb_path` | `{src, dst}` |
+| `iface.stall_coupling` | `{a, b}` |
+| `iface.registered` | `{port}` |
+| `timing.io_delay_ps` | `{port, ps: int ≥ 0}` |
+| `area.estimate` | `{value ≥ 0, unit, source?, cond?}`; unit is one of `um2`, `mm2`, `ge`, `cells`, `luts`, `ffs`, `brams`, `dsps` |
+
+`sim.*` is reserved; its kinds are defined when a producer exists.
 
 **Registering kinds.** A package registers more kinds through the entry-point group
 `zuspec.fact_kinds`, whose callable returns a list of `FactKind`, or by calling
@@ -81,6 +98,9 @@ An `Overlay` is the facts from one run against one version of a model:
   - **`coverage`**: how much of the design maps back to source
   - **`artifacts`**: the engine's own files
   - an `overlay_id`
+  - **`provenance`**: who stands behind the facts, most trusted first: `engine` (the
+    default), `generator`, `measured`, `declared`. `rank(provenance)` gives 0 for the most
+    trusted. Each source writes its own overlay.
 - **Facts are stored in columns per kind**, which keeps them compact and fast to load.
 - **Several overlays coexist:** XLS and native, main and a pull request, a sweep. They are
   compared anchor by anchor.
@@ -93,6 +113,11 @@ overlay=None)`. Each answer is a `FactView` with a status:
 - **`stale`:** the scope changed since the engine ran. Stale facts are kept, so an editor
   can show the last build's results greyed out.
 - **`orphan`:** the anchor no longer exists.
+
+`conflicts()` lists facts that contradict a more trusted overlay's fact of the same kind on
+the same anchor and ports (`CONFLICT_KEYS`). A latency range must lie inside the less
+trusted range; the other compared kinds must be equal. Overlays of the same provenance are
+not compared. Each `Conflict` has `kind`, `anchor`, `higher` and `lower` (`FactView`s).
 
 ## 5. File formats
 

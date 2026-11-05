@@ -73,6 +73,10 @@
     },
     "overlay_id": {
      "type": "string"
+    },
+    "provenance": {
+     "enum": ["engine", "generator", "measured", "declared"],
+     "default": "engine"
     }
    }
   },

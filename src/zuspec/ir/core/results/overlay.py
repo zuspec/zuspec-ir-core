@@ -13,6 +13,15 @@ from .kinds import validate
 OVERLAY_FORMAT = "zuspec.overlay"
 OVERLAY_VERSION = 1
 
+#: Who stands behind an overlay's facts, most trusted first: an engine that
+#: built the block, a library generator, a characterization run, a person.
+PROVENANCES = ("engine", "generator", "measured", "declared")
+
+
+def rank(provenance: str) -> int:
+    """0 for the most trusted provenance."""
+    return PROVENANCES.index(provenance)
+
 
 def _hash(obj: Any) -> str:
     data = json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
@@ -38,15 +47,22 @@ class OverlayHeader:
     #: The engine's own files (IR, schedule, RTL, ...), by role.
     artifacts: Dict[str, str] = dc.field(default_factory=dict)
     overlay_id: Optional[str] = None
+    #: One of :data:`PROVENANCES`.
+    provenance: str = "engine"
 
     @property
     def constraints_hash(self) -> str:
         return _hash(self.constraints)
 
     def __post_init__(self):
+        if self.provenance not in PROVENANCES:
+            raise ValueError(f"unknown overlay provenance {self.provenance!r}")
         if self.overlay_id is None:
-            self.overlay_id = _hash([self.engine, self.engine_version, self.constraints,
-                                     self.created, self.scope_hashes])[:12]
+            key = [self.engine, self.engine_version, self.constraints, self.created,
+                   self.scope_hashes]
+            if self.provenance != "engine":
+                key.append(self.provenance)
+            self.overlay_id = _hash(key)[:12]
 
 
 class Overlay:

@@ -7,7 +7,8 @@ from typing import Dict, List, Optional, Union
 from ..anchor import AnchorTable, split_qualifier
 from ..base import Base
 from .fact import Fact
-from .overlay import Overlay
+from .kinds import latency_range
+from .overlay import Overlay, rank
 
 #: A fact's standing against the current model.
 VALID, STALE, ORPHAN = "valid", "stale", "orphan"
@@ -20,6 +21,44 @@ class FactView:
     #: valid: its scope is unchanged since the engine ran; stale: the scope
     #: changed; orphan: the anchor no longer exists.
     status: str
+
+
+#: Kinds :meth:`ResultStore.conflicts` compares, and the value fields that say
+#: which facts are about the same thing (the ports).
+CONFLICT_KEYS = {
+    "iface.latency": ("src", "dst"),
+    "iface.ii": ("port",),
+    "iface.throughput": ("port",),
+    "iface.capacity": ("src", "dst"),
+    "iface.registered": ("port",),
+    "timing.io_delay_ps": ("port",),
+}
+
+
+@dc.dataclass(frozen=True)
+class Conflict:
+    """A fact from a more trusted overlay (*higher*) that contradicts one from
+    a less trusted overlay (*lower*) on the same anchor and ports."""
+    kind: str
+    anchor: str
+    higher: FactView
+    lower: FactView
+
+    def __str__(self) -> str:
+        h, l = self.higher, self.lower
+        return (f"{self.kind} on {self.anchor}: {h.overlay.header.provenance} "
+                f"({h.overlay.header.engine}) says {h.fact.value!r}, but "
+                f"{l.overlay.header.provenance} ({l.overlay.header.engine}) says "
+                f"{l.fact.value!r}")
+
+
+def agrees(kind: str, higher, lower) -> bool:
+    """True when *higher* (the more trusted value) does not contradict *lower*."""
+    if kind == "iface.latency":
+        hlo, hhi = latency_range(higher)
+        llo, lhi = latency_range(lower)
+        return hlo >= llo and (lhi is None or (hhi is not None and hhi <= lhi))
+    return higher == lower
 
 
 class ResultStore:
@@ -87,3 +126,27 @@ class ResultStore:
                 idx.setdefault(split_qualifier(f.anchor)[0], []).append(f)
             self._index[o.header.overlay_id] = idx
         return idx
+
+    def conflicts(self) -> List[Conflict]:
+        """Facts that contradict a fact of a more trusted overlay: a latency
+        range must lie inside the less trusted one's; other compared kinds
+        (:data:`CONFLICT_KEYS`) must be equal. Overlays of the same provenance
+        are not compared."""
+        groups: Dict[tuple, List[FactView]] = {}
+        for o in self.overlays():
+            for f in o.facts():
+                keys = CONFLICT_KEYS.get(f.kind)
+                if keys is None:
+                    continue
+                g = (f.kind, f.anchor, tuple(f.value.get(k) for k in keys))
+                groups.setdefault(g, []).append(FactView(f, o, self.status(f, o)))
+        out = []
+        for (kind, anchor, _), views in groups.items():
+            views.sort(key=lambda v: rank(v.overlay.header.provenance))
+            for i, hv in enumerate(views):
+                for lv in views[i + 1:]:
+                    if rank(hv.overlay.header.provenance) == rank(lv.overlay.header.provenance):
+                        continue
+                    if not agrees(kind, hv.fact.value, lv.fact.value):
+                        out.append(Conflict(kind, anchor, hv, lv))
+        return out
