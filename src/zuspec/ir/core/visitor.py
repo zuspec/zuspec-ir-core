@@ -156,6 +156,12 @@ class Visitor:
     # Interface-Protocol IR visitor stubs
     # ------------------------------------------------------------------
 
+    def visitStmtFork(self, o):
+        """Visit a StmtFork node: each branch's statements."""
+        for b in o.branches:
+            for st in b:
+                st.accept(self)
+
     def visitSpawnStmt(self, o):
         """Visit a SpawnStmt node (default: no-op)."""
         pass

@@ -119,6 +119,15 @@ class StmtPass(Stmt):
     pass
 
 @dc.dataclass(kw_only=True)
+class StmtFork(Stmt):
+    """Fork/join in procedural (timed) code: the branches run concurrently
+    from this point. ``join``: ``all`` continues when every branch has
+    finished, ``any`` when the first has (the others run on), ``none`` at
+    once. (Activity-level parallelism is ``ActivityParallel``.)"""
+    branches: List[List[Stmt]] = dc.field(default_factory=list)
+    join: str = dc.field(default="all")
+
+@dc.dataclass(kw_only=True)
 class StmtRaise(Stmt):
     exc: Optional[Expr] = dc.field(default=None)
     cause: Optional[Expr] = dc.field(default=None)

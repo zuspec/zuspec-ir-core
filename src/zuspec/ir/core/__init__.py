@@ -102,7 +102,7 @@ from .expr_phase2 import (
 )
 from .stmt import (
     Stmt, StmtExpr, StmtAssign, StmtAnnAssign, StmtAugAssign, StmtReturn, StmtIf, StmtIfClause, StmtIfChain, StmtFor,
-    StmtWhile, StmtBreak, StmtContinue, StmtPass, StmtRaise, StmtAssert, Alias, Arg, Arguments,
+    StmtWhile, StmtBreak, StmtContinue, StmtPass, StmtFork, StmtRaise, StmtAssert, Alias, Arg, Arguments,
     StmtAssume, StmtCover, StmtUnique, StmtDefault, StmtDefaultDisable,
     WithItem, StmtWith, StmtExceptHandler, StmtTry, TypeIgnore, Module,
     StmtMatch, StmtMatchCase, Pattern, PatternValue, PatternAs, PatternOr, PatternSequence,
@@ -213,7 +213,7 @@ __all__ = [
     "ExprSext","ExprZext","ExprCbit","ExprSigned","ExprNew",
     "ExprConcat","ExprReplicate","ExprPartSelect",
     "Stmt","StmtExpr","StmtAssign","StmtAnnAssign","StmtAugAssign","StmtReturn","StmtIf","StmtIfClause","StmtIfChain","StmtFor","StmtWhile",
-    "StmtBreak","StmtContinue","StmtPass","StmtRaise","StmtAssert","StmtAssume","StmtCover","StmtUnique","StmtDefault","StmtDefaultDisable","Alias","Arg","Arguments",
+    "StmtBreak","StmtContinue","StmtPass","StmtFork","StmtRaise","StmtAssert","StmtAssume","StmtCover","StmtUnique","StmtDefault","StmtDefaultDisable","Alias","Arg","Arguments",
     # PSS-specific statements
     "StmtRepeat","StmtRepeatWhile","StmtForeach","StmtYield","StmtSuper","StmtRandomize",
     # Interface-protocol statements
