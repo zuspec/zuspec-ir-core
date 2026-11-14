@@ -231,6 +231,11 @@ class DataTypeMemory(DataType):
     """Represents a Memory type - storage for data elements"""
     element_type : Optional[DataType] = dc.field(default=None)
     size : int = dc.field(default=1024)
+    # Synchronous memory ports: read and write port counts, and the width in
+    # bits of one write-strobe lane (0: no strobe; 8: byte strobes).
+    read_ports : int = dc.field(default=1)
+    write_ports : int = dc.field(default=1)
+    strobe_bits : int = dc.field(default=0)
 
 @dc.dataclass(kw_only=True)
 class DataTypeAddressSpace(DataType):

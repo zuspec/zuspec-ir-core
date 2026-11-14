@@ -4,7 +4,7 @@ import dataclasses as dc
 import enum
 from typing import Any, Dict, List, Optional
 from .base import Base
-from .data_type import DataType
+from .data_type import DataType, ProcessKind
 from .expr import Expr
 
 class FieldKind(enum.Enum):
@@ -94,6 +94,14 @@ class Field(Base):
     is_variable_size : bool = dc.field(default=False)  # True if array has variable size
     pragmas : Dict[str, Any] = dc.field(default_factory=dict)  # From ``# zdc: key=value, flag`` comments
     reset_value : Optional[Any] = dc.field(default=None)  # Reset value from output(reset=N) or reg(reset=N)
+    # Synchronous logic (fw-hdl step()/comb()): the kind of process that drives
+    # the field (SYNC: a register; COMB: combinational logic), the value a sync
+    # output shows while its domain is in reset (lowers to
+    # ``assign pin = reset ? V : q``), and True for state that is left out of
+    # the reset branch.
+    drive : Optional[ProcessKind] = dc.field(default=None)
+    reset_force : Optional[Any] = dc.field(default=None)
+    no_reset : bool = dc.field(default=False)
     
     @property
     def is_array(self) -> bool:
