@@ -74,23 +74,31 @@ class IRSerializer:
         if obj is None:
             return None
 
-        obj_id = id(obj)
-        if not isinstance(obj, (str, int, float, bool, type)):
-            if obj_id in self._seen:
-                return {"_ref": obj_id}
-            self._seen.add(obj_id)
-
         if isinstance(obj, type):
             # Python class reference.
             return {"_type_ref": f"{obj.__module__}.{obj.__qualname__}"}
 
         if isinstance(obj, bool):
             return obj
+        if isinstance(obj, enum.Enum):
+            # Tagged so the deserializer can rebuild the member (an IntEnum
+            # is an int too, so this comes first).
+            return {"_enum": f"{type(obj).__name__}.{obj.name}"}
         if isinstance(obj, (int, float, str)):
             return obj
 
-        if isinstance(obj, enum.Enum):
-            return obj.name
+        # Only a cycle is cut (an object inside itself): an object reached
+        # twice through different paths is written in full each time.
+        obj_id = id(obj)
+        if obj_id in self._seen:
+            return {"_ref": obj_id}
+        self._seen.add(obj_id)
+        try:
+            return self._compound(obj)
+        finally:
+            self._seen.discard(obj_id)
+
+    def _compound(self, obj: Any) -> Any:
 
         if isinstance(obj, (list, tuple)):
             return [self._to_dict(item) for item in obj]

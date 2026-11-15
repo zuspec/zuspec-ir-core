@@ -1,7 +1,7 @@
 from __future__ import annotations
 import dataclasses as dc
 import enum
-from typing import List, Optional, Protocol, TYPE_CHECKING, Iterator, Any
+from typing import Dict, List, Optional, Protocol, TYPE_CHECKING, Iterator, Any
 from .base import Base
 from .expr import Expr
 
@@ -43,6 +43,14 @@ class DataTypePyObj(Base):
 class DataTypeInt(DataType):
     bits : int = dc.field(default=-1)
     signed : bool = dc.field(default=True)
+    #: The width as an expression of the enclosing component's template
+    #: parameters (``clog2(DEPTH)``), or None. ``bits`` is its value at the
+    #: parameters' defaults.
+    width_expr : Optional[Expr] = dc.field(default=None, compare=False)
+    #: Whether a bit has four states (SV ``logic``: 0, 1, X, Z) or two (SV
+    #: ``bit``). None leaves it unstated: a back end uses its own default.
+    #: A front end that knows (``bit [7:0]`` vs ``logic [7:0]``) says so.
+    four_state : Optional[bool] = dc.field(default=None)
 
 @dc.dataclass(kw_only=True)
 class DataTypeUptr(DataType):
@@ -77,6 +85,14 @@ class DataTypeStruct(DataType):
     flow_kind : Optional[FlowKind] = dc.field(default=None)
     has_initial_constraint : bool = dc.field(default=False)  # True when a ConstraintBlock references the `initial` keyword
     covergroups : List = dc.field(default_factory=list)  # list[PssCoverGroup]
+    #: A packed struct: its members are laid out as one integral value, the
+    #: first member in the most significant bits (SV ``struct packed``).
+    packed : bool = dc.field(default=False)
+    #: For a type declared outside the IR (in sources a back end does not
+    #: generate, such as a package of the RTL an extern brings), the name it
+    #: is declared under there (``prm_pkg::cfg_t``). A back end refers to the
+    #: type by that name and does not declare it. None: the IR declares it.
+    extern_name : Optional[str] = dc.field(default=None)
 #    constraints
 
 @dc.dataclass(kw_only=True)
@@ -131,16 +147,92 @@ class DataTypeComponent(DataTypeClass):
     # Clock/reset domain (None → inherit from parent at elaboration time)
     clock_domain:     Optional[Any] = dc.field(default=None)   # ClockDomain | None
     reset_domain:     Optional[Any] = dc.field(default=None)   # ResetDomain | None
+    # Parameters of a parameterized component (an SV module's ``#(...)``):
+    # TemplateParamValue / TemplateParamType. Inside the component, a value
+    # parameter is read as ``ExprRefParam(name)`` and a type parameter is
+    # ``DataTypeRef(name)``.
+    template_params:  List['TemplateParam'] = dc.field(default_factory=list)
+    # Continuous assignments of a flat structural component (``assign lhs =
+    # rhs``): a port driven straight from a port or a constant. A pass such
+    # as zuspec.synth's struct flattening fills them in, with
+    # ``module_instances``, from ``bind_map``.
+    net_assigns:      List['NetAssign'] = dc.field(default_factory=list)
+    # Generate blocks (``GenerateFor``/``GenerateIf``) of a structural
+    # component: in the structural form, connections made in a loop or
+    # under a condition on template parameters; in the flat form, the
+    # instances and assigns inside them.
+    generates:        List[Any] = dc.field(default_factory=list)
+    # Set by a structural flattening pass: the component is in the flat
+    # structural form (ports, nets, ``net_assigns``, ``module_instances``,
+    # ``generates``), which a back end emits as such.
+    flat_structural:  bool = dc.field(default=False)
 
 
 @dc.dataclass(kw_only=True)
 class DataTypeExtern(DataTypeComponent):
     """Extern component signature.
 
-    Represents an externally-implemented component/module.
+    Represents an externally-implemented component/module. Its ports and
+    bundles are ``fields``, as a component's are. ``extern_name`` is the
+    module that realizes it; ``extern_params`` and ``pins`` say how to
+    instantiate that module.
     """
 
     extern_name: Optional[str] = dc.field(default=None)
+    #: The module's parameter values, in order: ``{"WIDTH": Expr}``. A
+    #: constant per specialization, or an expression of the enclosing
+    #: component's template parameters.
+    extern_params: Dict[str, Expr] = dc.field(default_factory=dict)
+    #: The pin map: one entry per module pin, in the module's port order.
+    #: Empty means unknown (a zdc ``Extern``): pins are then named after
+    #: the ports.
+    pins: List['ExternPin'] = dc.field(default_factory=list)
+
+
+@dc.dataclass(kw_only=True)
+class ExternPin(Base):
+    """One pin of an extern's module, and what drives or reads it.
+
+    Exactly one of ``path``, ``tie`` and ``open`` is set:
+
+    - ``path``: a port or bundle member of the extern, as field names from
+      the extern down (``["in", "valid"]``, ``["clk"]``);
+    - ``tie``: a constant on an input pin;
+    - ``open``: an output pin left unconnected.
+
+    ``datatype`` is the pin's type, from the module's header, in the terms
+    of the extern's template parameters (a width over them is a
+    ``width_expr``), when known. It is needed only for an open pin: a back
+    end connects the pin to a net of that type that nothing reads.
+    """
+
+    name: str = dc.field()
+    path: Optional[List[str]] = dc.field(default=None)
+    tie: Optional[Expr] = dc.field(default=None)
+    open: bool = dc.field(default=False)
+    datatype: Optional[DataType] = dc.field(default=None)
+
+
+class BundleRole(enum.Enum):
+    """The role of a bundle-typed field. A bundle type declares member
+    directions from its initiator's point of view."""
+    INITIATOR = enum.auto()   # members keep their declared directions
+    MIRROR    = enum.auto()   # every declared direction flips
+    MONITOR   = enum.auto()   # every member is an input
+
+
+@dc.dataclass(kw_only=True)
+class DataTypeBundle(DataTypeStruct):
+    """A bundle type: a named, ordered group of signal ports and nested
+    bundles. A signal member is a ``FieldInOut`` whose direction is the
+    initiator's; a nested bundle is a ``Field`` whose datatype refers to a
+    ``DataTypeBundle`` and whose ``role`` is set. A bundle is used only
+    through a field with a role.
+
+    A bundle may be generic: ``template_params`` (type parameters, say
+    ``T``), members typed ``DataTypeRef(T)``, and each field of the bundle
+    type giving their values in its ``inst_params``."""
+    template_params: List['TemplateParam'] = dc.field(default_factory=list)
 
 if TYPE_CHECKING:
     from .fields import Bind, Pool, PoolBind
@@ -162,6 +254,13 @@ class DataTypeEnum(DataType):
     """
     items: dict = dc.field(default_factory=dict)  # OrderedDict[str, int]
     width: int = dc.field(default=0)  # 0 = auto-infer from items
+    #: The integral type the values are encoded in (its width, signedness
+    #: and ``four_state``), when the source names one (SV ``enum logic
+    #: [1:0]``). None: unstated (``width`` bits, the back end's default).
+    base_type: Optional[DataType] = dc.field(default=None)
+    #: As :attr:`DataTypeStruct.extern_name`: the name the type is declared
+    #: under outside the IR, or None when the IR declares it.
+    extern_name: Optional[str] = dc.field(default=None)
 
 @dc.dataclass(kw_only=True)
 class DataTypeString(DataType): ...
@@ -197,6 +296,9 @@ class DataTypeArray(DataType):
     #: (``ch[wb_dma_types_pkg::WB_DMA_MAX_CH]``), or None. Provenance only;
     #: ``size`` is the value.
     size_ref: Optional[str] = dc.field(default=None, compare=False)
+    #: The size as an expression of the enclosing component's template
+    #: parameters (``N``), or None. ``size`` is its value at the defaults.
+    size_expr: Optional[Expr] = dc.field(default=None, compare=False)
 
 @dc.dataclass(kw_only=True)
 class DataTypeMap(DataType):

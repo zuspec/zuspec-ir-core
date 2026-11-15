@@ -4,7 +4,7 @@ import dataclasses as dc
 import enum
 from typing import Any, Dict, List, Optional
 from .base import Base
-from .data_type import DataType, ProcessKind
+from .data_type import BundleRole, DataType, ProcessKind
 from .expr import Expr
 
 class FieldKind(enum.Enum):
@@ -102,6 +102,24 @@ class Field(Base):
     drive : Optional[ProcessKind] = dc.field(default=None)
     reset_force : Optional[Any] = dc.field(default=None)
     no_reset : bool = dc.field(default=False)
+    # The role of a bundle-typed field (its datatype refers to a
+    # DataTypeBundle): initiator, mirror or monitor. None for any other field.
+    role : Optional[BundleRole] = dc.field(default=None)
+    # A child-instance or bundle field of a parameterized type (one with
+    # ``template_params``): the value of each parameter, by name, in the
+    # enclosing component's terms: an ``Expr`` (``ExprRefParam`` for its
+    # template parameters) for a value parameter, a ``DataType`` for a type
+    # parameter. Parameters left out take their defaults.
+    inst_params : Dict[str, Any] = dc.field(default_factory=dict)
+    # An array of child instances (``datatype`` a ``DataTypeArray`` of a
+    # component): the name that stands for the element index in
+    # ``inst_params`` (``ExprRefLocal(name=index_var)``).
+    # A port (``FieldInOut``) or a bundle field (with ``role``) whose
+    # ``datatype`` is a ``DataTypeArray`` is an array of ports or of bundles
+    # (``size_expr`` over the component's template parameters); a
+    # connection names an element with a subscript on the path element
+    # (``in[i].valid``, or ``x.in[i]`` for a child's).
+    index_var : Optional[str] = dc.field(default=None)
     
     @property
     def is_array(self) -> bool:

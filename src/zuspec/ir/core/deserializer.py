@@ -14,6 +14,7 @@ the dot-separated path to the node in the YAML tree.
 from __future__ import annotations
 
 import dataclasses as dc
+import enum
 import importlib
 import inspect
 from typing import Any, Dict, List, Optional, Tuple, Type
@@ -46,6 +47,7 @@ class IRDeserializer:
 
     def __init__(self) -> None:
         self._registry: Dict[str, Type] = {}
+        self._enums: Dict[str, Type] = {}
 
     def register(self, type_tag: str, cls: Type) -> None:
         """Map a ``_type`` tag string to a Python class.
@@ -81,6 +83,8 @@ class IRDeserializer:
             # Register dataclasses and Base subclasses.
             if (Base is not None and issubclass(obj, Base)) or dc.is_dataclass(obj):
                 self._registry[obj.__name__] = obj
+            elif issubclass(obj, enum.Enum):
+                self._enums[obj.__name__] = obj
 
     def deserialize(self, yaml_text: str) -> Tuple[Any, Any]:
         """Parse *yaml_text* and reconstruct the IR object tree.
@@ -125,6 +129,15 @@ class IRDeserializer:
 
         if not isinstance(data, dict):
             return data
+
+        # Enum member (``{"_enum": "BundleRole.MIRROR"}``).
+        if "_enum" in data:
+            cname, _, member = str(data["_enum"]).rpartition(".")
+            ecls = self._enums.get(cname)
+            if ecls is None:
+                raise IRDeserializeError(f"Unknown enum {cname!r} at {path!r}",
+                                         tag=cname, path=path)
+            return ecls[member]
 
         # Type reference stub (unresolvable at load time without importing).
         if "_type_ref" in data:

@@ -49,7 +49,7 @@ def json_converter(pmod, *args, **kwargs):
 # M0 additions: provenance, pass infrastructure, connections, RTL IR
 from .provenance import Provenance
 from .domain_node import DomainNode
-from .connection import Connection, Signal, Bundle, MethodInterface, PortConnection, ModuleInstance
+from .connection import Connection, Signal, Bundle, MethodInterface, PortConnection, ModuleInstance, NetAssign, GenerateFor, GenerateIf
 from .signature import (BlockSignature, ChannelSignature, DataPortSignature, load_signature, save_signature,
                         signature_from_json, signature_to_json)
 from .anchor import (AnchorEntry, AnchorTable, assign_anchors, mark_synthesized,
@@ -58,7 +58,7 @@ from .anchor import (AnchorEntry, AnchorTable, assign_anchors, mark_synthesized,
 # Re-export data model types
 from .fields import Bind, BindSet, Field, FieldInOut, FieldKind, SignalDirection, RandKind, FieldMetaKind, ClaimMode, Pool, PoolBind
 from .data_type import (
-    DataType, DataTypeInt, DataTypeUptr, DataTypeStruct, DataTypeClass, DataTypeAction, DataTypeComponent, DataTypeExtern,
+    DataType, DataTypeInt, DataTypeUptr, DataTypeStruct, DataTypeClass, DataTypeAction, DataTypeComponent, DataTypeExtern, DataTypeBundle, ExternPin, BundleRole,
     DataTypeExpr, DataTypeEnum, DataTypeString, DataTypeChandle,
     DataTypeList, DataTypeArray, DataTypeMap, DataTypeSet,
     DataTypeLock, DataTypeEvent, DataTypeMemory,
@@ -182,7 +182,7 @@ __all__ = [
     "profile","Annotation","AnnotationEnum","Base","BaseP","Loc","Visitor","JsonConverter","json_converter",
     "Bind","BindSet","Field","FieldInOut","FieldKind","SignalDirection",
     "RandKind","FieldMetaKind","ClaimMode","Pool","PoolBind",
-    "DataType","DataTypeInt","DataTypeUptr","DataTypeStruct","DataTypeClass","DataTypeAction","DataTypeComponent","DataTypeExtern",
+    "DataType","DataTypeInt","DataTypeUptr","DataTypeStruct","DataTypeClass","DataTypeAction","DataTypeComponent","DataTypeExtern","DataTypeBundle","ExternPin","BundleRole",
     "DataTypeExpr","DataTypeEnum","DataTypeString","DataTypeChandle",
     "DataTypeList","DataTypeArray","DataTypeMap","DataTypeSet",
     "DataTypeLock","DataTypeEvent","DataTypeMemory",
@@ -233,7 +233,7 @@ __all__ = [
     "ActivityConstraint","ActivityFieldDecl","ActivityBind","ActivitySchedulingConstraint",
     # M0 foundations
     "Provenance","DomainNode","Connection","Signal","Bundle","MethodInterface",
-    "PortConnection","ModuleInstance",
+    "PortConnection","ModuleInstance","NetAssign","GenerateFor","GenerateIf",
     # Pipeline async IR
     "HazardOpKind","AccessDir",
     "IrPipeline","IrStage","IrHazardOp","IrIngressOp","IrEgressOp",
