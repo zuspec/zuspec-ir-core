@@ -75,6 +75,11 @@ from .data_type import (
     # Interface-protocol types
     IfProtocolProperties, IfProtocolType, CompletionType, QueueType,
 )
+from .domain import (
+    DomainRel, DomainSeverity, DomainDerivDecl, DataTypeDomainKind, DataTypeDomain,
+    DomainRef, DomainDecl, DomainAssoc, DomainDriver, DomainWaiver,
+    DomainPortName, DomainProvides, port_name_key,
+)
 from .expr import (
     Expr, BinOp, UnaryOp, BoolOp, CmpOp, AugOp,
     ExprBin, ExprRef, ExprConstant, int_literal_type, TypeExprRefSelf, TypeExprRefSuper, TypeExprRefTraversed,
@@ -183,6 +188,9 @@ __all__ = [
     "Bind","BindSet","Field","FieldInOut","FieldKind","SignalDirection",
     "RandKind","FieldMetaKind","ClaimMode","Pool","PoolBind",
     "DataType","DataTypeInt","DataTypeUptr","DataTypeStruct","DataTypeClass","DataTypeAction","DataTypeComponent","DataTypeExtern","DataTypeBundle","ExternPin","BundleRole",
+    "DomainRel","DomainSeverity","DomainDerivDecl","DataTypeDomainKind","DataTypeDomain",
+    "DomainRef","DomainDecl","DomainAssoc","DomainDriver","DomainWaiver",
+    "DomainPortName","DomainProvides","port_name_key",
     "DataTypeExpr","DataTypeEnum","DataTypeString","DataTypeChandle",
     "DataTypeList","DataTypeArray","DataTypeMap","DataTypeSet",
     "DataTypeLock","DataTypeEvent","DataTypeMemory",

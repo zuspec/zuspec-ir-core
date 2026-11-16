@@ -16,6 +16,9 @@ Type references (Python class objects stored in IR fields) are serialized as
 ``{"_type_ref": "FullyQualifiedName"}``.  Circular references are detected via
 an ``id(obj)`` set and emitted as ``{"_ref": <int>}`` stubs to avoid infinite
 recursion.
+
+A field whose name starts with ``_``, or whose metadata has
+``serialize: False``, is not written.
 """
 from __future__ import annotations
 
@@ -112,7 +115,7 @@ class IRSerializer:
         if dc.is_dataclass(obj) and not isinstance(obj, type):
             result: Dict[str, Any] = {"_type": type(obj).__name__}
             for f in dc.fields(obj):
-                if f.name.startswith("_"):
+                if f.name.startswith("_") or not f.metadata.get("serialize", True):
                     continue
                 result[f.name] = self._to_dict(getattr(obj, f.name))
             return result

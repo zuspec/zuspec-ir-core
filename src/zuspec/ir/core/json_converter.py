@@ -90,7 +90,7 @@ class JsonConverter:
         if dc.is_dataclass(obj):
             for f in dc.fields(obj):
                 # Skip internal fields
-                if f.name.startswith('_'):
+                if f.name.startswith('_') or not f.metadata.get("serialize", True):
                     continue
                 
                 value = getattr(obj, f.name)
@@ -133,7 +133,7 @@ class JsonConverter:
         }
         
         for f in dc.fields(obj):
-            if f.name.startswith('_'):
+            if f.name.startswith('_') or not f.metadata.get("serialize", True):
                 continue
             value = getattr(obj, f.name)
             result[f.name] = self._convertValue(value)

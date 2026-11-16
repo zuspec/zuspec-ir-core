@@ -7,6 +7,8 @@ from .expr import Expr
 
 if TYPE_CHECKING:
     from .fields import Field
+    from .domain import (DomainDecl, DomainAssoc, DomainDriver, DomainWaiver, DomainRef,
+                         DomainPortName, DomainProvides)
     from .stmt import Stmt, Arguments
     from .activity import ActivitySequenceBlock
 
@@ -144,9 +146,12 @@ class DataTypeComponent(DataTypeClass):
     pipeline_root_ir: Optional[Any] = dc.field(default=None)   # PipelineRootIR | None
     stage_method_irs: List[Any]     = dc.field(default_factory=list)  # List[StageMethodIR]
     sync_method_irs:  List[Any]     = dc.field(default_factory=list)  # List[SyncMethodIR]
-    # Clock/reset domain (None → inherit from parent at elaboration time)
-    clock_domain:     Optional[Any] = dc.field(default=None)   # ClockDomain | None
-    reset_domain:     Optional[Any] = dc.field(default=None)   # ResetDomain | None
+    # The front end's own clock/reset domain objects (zdc's ClockDomain /
+    # ResetDomain), kept for readers that have not moved to the domain IR
+    # below. Not serialized: ``domains``, ``domain_assocs`` and
+    # ``domain_drivers`` are what the IR says about domains.
+    clock_domain:     Optional[Any] = dc.field(default=None, metadata={"serialize": False})
+    reset_domain:     Optional[Any] = dc.field(default=None, metadata={"serialize": False})
     # Parameters of a parameterized component (an SV module's ``#(...)``):
     # TemplateParamValue / TemplateParamType. Inside the component, a value
     # parameter is read as ``ExprRefParam(name)`` and a type parameter is
@@ -166,6 +171,16 @@ class DataTypeComponent(DataTypeClass):
     # structural form (ports, nets, ``net_assigns``, ``module_instances``,
     # ``generates``), which a back end emits as such.
     flat_structural:  bool = dc.field(default=False)
+    # Domains (``domain.py``): the domain objects the component creates,
+    # its associations, drivers and crossing waivers, in call order; the
+    # names it gives its generated domain ports and the derivations it
+    # states it drives.
+    domains:          List['DomainDecl'] = dc.field(default_factory=list)
+    domain_assocs:    List['DomainAssoc'] = dc.field(default_factory=list)
+    domain_drivers:   List['DomainDriver'] = dc.field(default_factory=list)
+    domain_waivers:   List['DomainWaiver'] = dc.field(default_factory=list)
+    domain_port_names: List['DomainPortName'] = dc.field(default_factory=list)
+    domain_provides:  List['DomainProvides'] = dc.field(default_factory=list)
 
 
 @dc.dataclass(kw_only=True)
@@ -193,12 +208,17 @@ class DataTypeExtern(DataTypeComponent):
 class ExternPin(Base):
     """One pin of an extern's module, and what drives or reads it.
 
-    Exactly one of ``path``, ``tie`` and ``open`` is set:
+    Exactly one of ``path``, ``tie``, ``open`` and ``domain_kind`` is set:
 
     - ``path``: a port or bundle member of the extern, as field names from
       the extern down (``["in", "valid"]``, ``["clk"]``);
     - ``tie``: a constant on an input pin;
-    - ``open``: an output pin left unconnected.
+    - ``open``: an output pin left unconnected;
+    - ``domain_kind``: a domain pin (``fw_domain #(K)::pin``/``pin_out``)
+      of that kind. ``domain`` is the domain (None: the extern's default
+      association of the kind, input pins only), ``domain_attr`` the pin's
+      attributes, and ``output`` is set for ``pin_out``, a pin that
+      drives the domain.
 
     ``datatype`` is the pin's type, from the module's header, in the terms
     of the extern's template parameters (a width over them is a
@@ -211,6 +231,10 @@ class ExternPin(Base):
     tie: Optional[Expr] = dc.field(default=None)
     open: bool = dc.field(default=False)
     datatype: Optional[DataType] = dc.field(default=None)
+    domain: Optional['DomainRef'] = dc.field(default=None)
+    domain_kind: Optional[str] = dc.field(default=None)
+    domain_attr: Dict[str, Expr] = dc.field(default_factory=dict)
+    output: bool = dc.field(default=False)
 
 
 class BundleRole(enum.Enum):
