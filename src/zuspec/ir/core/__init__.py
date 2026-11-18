@@ -83,6 +83,7 @@ from .domain import (
 from .protocol_hub import (
     ProtoDir, ProtocolRef, ProtocolApi, DataTypeProtocolHub, ProtocolConverter,
     BundleProtocol, ApiEndpoint, ApiConnection, CfgPublisher, CfgConsumer, CfgConnection,
+    CfgListener,
 )
 from .proc_block import ProcKind, ProcBlock, ExprInReset
 from .expr import (
@@ -198,6 +199,7 @@ __all__ = [
     "DomainPortName","DomainProvides","port_name_key",
     "ProtoDir","ProtocolRef","ProtocolApi","DataTypeProtocolHub","ProtocolConverter",
     "BundleProtocol","ApiEndpoint","ApiConnection","CfgPublisher","CfgConsumer","CfgConnection",
+    "CfgListener",
     "ProcKind","ProcBlock","ExprInReset",
     "DataTypeExpr","DataTypeEnum","DataTypeString","DataTypeChandle",
     "DataTypeList","DataTypeArray","DataTypeMap","DataTypeSet",

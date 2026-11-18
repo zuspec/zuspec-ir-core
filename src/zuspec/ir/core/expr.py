@@ -35,6 +35,9 @@ class BinOp(enum.Enum):
     #: SV ``>>>``: arithmetic when the left operand is signed, logical when it
     #: is unsigned. (``RShift`` is always logical.)
     ARShift = enum.auto()
+    #: SV case equality ``===`` / ``!==``: X and Z bits compare as values,
+    #: so the result is never X. (``Eq``/``NotEq`` are logical ``==``/``!=``.)
+    CaseEq = enum.auto(); CaseNotEq = enum.auto()
 
 class UnaryOp(enum.Enum):
     Invert = enum.auto(); Not = enum.auto(); UAdd = enum.auto(); USub = enum.auto()
@@ -46,6 +49,8 @@ class BoolOp(enum.Enum):
 
 class CmpOp(enum.Enum):
     Eq = enum.auto(); NotEq = enum.auto(); Lt = enum.auto(); LtE = enum.auto(); Gt = enum.auto(); GtE = enum.auto(); Is = enum.auto(); IsNot = enum.auto(); In = enum.auto(); NotIn = enum.auto()
+    #: SV case equality ``===`` / ``!==`` (see ``BinOp.CaseEq``).
+    CaseEq = enum.auto(); CaseNotEq = enum.auto()
 
 class AugOp(enum.Enum):
     Add = enum.auto(); Sub = enum.auto(); Mult = enum.auto(); Div = enum.auto(); Mod = enum.auto(); Pow = enum.auto()
@@ -344,8 +349,13 @@ class ExprStructLiteral(Expr):
     """Struct initialization: {.field1 = val1, .field2 = val2}
     
     PSS syntax for struct literals with named field assignments.
+
+    ``default``, when set, is the value of every member not named in
+    ``fields`` (SV ``'{a: 1, default: 0}``); ``ExprStructLiteral(default=0)``
+    is a struct's all-zero value.
     """
     fields: list[ExprStructField] = dc.field(default_factory=list)
+    default: Optional[Expr] = dc.field(default=None)
 
 
 # ============================================================================

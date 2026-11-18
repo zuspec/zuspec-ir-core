@@ -5,12 +5,12 @@ An *API* is an interface class: the existing ``DataTypeProtocol`` (its
 ``DataTypeClass.implements``.
 
 A *protocol hub* is a ``DataTypeProtocolHub``, stored once in
-``Context.type_m`` under its family name: its template parameters, the
-APIs it carries (at most one per direction), its configuration type and
-its static functions. A specialization of a family is always a
+``Context.type_m`` under its family name: its template parameters and
+the APIs it carries (at most one per direction). A specialization of a family is always a
 ``ProtocolRef`` (family plus named params), never a type of its own.
 
-A bundle class names its protocol in ``DataTypeClass.bundle_protocol``.
+A bundle class names its protocol in ``DataTypeClass.bundle_protocol``
+(``DataTypeBundle.bundle_protocol`` for a bundle type).
 A component holds, in call order:
 
 - ``converter``: set on a transactor or abstractor component
@@ -19,7 +19,11 @@ A component holds, in call order:
 - ``api_endpoints``: its ports, exports and sockets;
 - ``api_connections``: the API connections it makes;
 - ``cfg_publishers``/``cfg_consumers``/``cfg_connections``: the
-  configuration objects it publishes and reads, and how they connect.
+  configuration objects it publishes and reads, and how they connect;
+- ``cfg_listeners``: the listeners its code registers on sinks.
+
+Configuration is connected, not run: the IR says which sinks and
+listeners a change at a source reaches, not what values they see.
 
 Paths are lists of field names from the component down, as in
 ``domain.py``. A domain association of an endpoint is a ``DomainAssoc``
@@ -31,7 +35,7 @@ import enum
 from typing import Dict, List, Optional
 
 from .base import Base
-from .data_type import DataType, Function, TemplateParam
+from .data_type import DataType, TemplateParam
 from .domain import PathElem
 from .expr import Expr
 
@@ -52,7 +56,8 @@ class ProtocolRef(Expr):
 
 @dc.dataclass(kw_only=True)
 class ProtocolApi(Base):
-    """One API a hub carries: ``api`` is a ``DataTypeProtocol`` name."""
+    """One API a hub carries: ``api`` is the name of a ``DataTypeProtocol``,
+    or of a ``DataTypeParameterized`` over one (a parameterized API)."""
     api: str = dc.field()
     dir: ProtoDir = dc.field()
 
@@ -61,17 +66,13 @@ class ProtocolApi(Base):
 class DataTypeProtocolHub(DataType):
     """A protocol family. ``name`` is the family's name.
 
-    - ``apis``: at most one per direction;
-    - ``cfg_type``: the configuration type, or None;
-    - ``functions``: the hub's static functions;
-    - ``xfer_time``/``mismatch``: names in ``functions``, or None.
+    - ``apis``: at most one per direction.
+
+    Configuration belongs to endpoints (``CfgPublisher``/``CfgConsumer``)
+    and timing to channels, not to the hub.
     """
     template_params: List[TemplateParam] = dc.field(default_factory=list)
     apis: List[ProtocolApi] = dc.field(default_factory=list)
-    cfg_type: Optional[DataType] = dc.field(default=None)
-    functions: List[Function] = dc.field(default_factory=list)
-    xfer_time: Optional[str] = dc.field(default=None)
-    mismatch: Optional[str] = dc.field(default=None)
 
 
 @dc.dataclass(kw_only=True)
@@ -99,7 +100,8 @@ class ApiEndpoint(Base):
 
     - ``kind``: ``port``, ``export``, ``socket`` or ``target_socket``;
     - ``api``: the API's name (port, export), or ``protocol`` (sockets);
-    - ``imp``: the implementation set by ``set_imp``; ``[]`` is derived.
+    - ``imp``: the path of the implementation set by ``set_imp``; ``[]``
+      is derived (the owner).
     """
     name: str = dc.field()
     kind: str = dc.field()
@@ -134,8 +136,19 @@ class CfgConsumer(Base):
 @dc.dataclass(kw_only=True)
 class CfgConnection(Base):
     """A publisher-to-consumer connection: one writer, the consumer
-    updated on each ``set()``. ``derived``: made by elaboration, not by
-    an explicit call."""
+    updated on each ``set()``. ``derived``: made by elaboration (a sink's
+    source, resolved through ``connect_up`` chains), not by an explicit
+    call."""
     publisher: List[PathElem] = dc.field(default_factory=list)
     consumer: List[PathElem] = dc.field(default_factory=list)
     derived: bool = dc.field(default=False)
+
+
+@dc.dataclass(kw_only=True)
+class CfgListener(Base):
+    """A listener registered on a configuration sink (``add_listener``):
+    its ``changed`` runs on each change that reaches ``sink``.
+    ``listener`` is the path of the listening object (``[]``: the
+    component itself), or None for an object no path reaches."""
+    sink: List[PathElem] = dc.field(default_factory=list)
+    listener: Optional[List[PathElem]] = dc.field(default_factory=list)

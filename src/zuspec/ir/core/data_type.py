@@ -10,7 +10,8 @@ if TYPE_CHECKING:
     from .domain import (DomainDecl, DomainAssoc, DomainDriver, DomainWaiver, DomainRef,
                          DomainPortName, DomainProvides)
     from .protocol_hub import (ProtocolRef, ProtocolConverter, BundleProtocol, ApiEndpoint,
-                               ApiConnection, CfgPublisher, CfgConsumer, CfgConnection)
+                               ApiConnection, CfgPublisher, CfgConsumer, CfgConnection,
+                               CfgListener)
     from .proc_block import ProcBlock
     from .stmt import Stmt, Arguments
     from .activity import ActivitySequenceBlock
@@ -190,7 +191,8 @@ class DataTypeComponent(DataTypeClass):
     domain_provides:  List['DomainProvides'] = dc.field(default_factory=list)
     # Protocols (``protocol_hub.py``): what a transactor or abstractor
     # converts; the protocol of each bundle instance; API endpoints and
-    # connections; configuration publishers, consumers and connections.
+    # connections; configuration publishers, consumers and connections,
+    # and the listeners registered on configuration sinks.
     converter:        Optional['ProtocolConverter'] = dc.field(default=None)
     bundle_protocols: List['BundleProtocol'] = dc.field(default_factory=list)
     api_endpoints:    List['ApiEndpoint'] = dc.field(default_factory=list)
@@ -198,6 +200,7 @@ class DataTypeComponent(DataTypeClass):
     cfg_publishers:   List['CfgPublisher'] = dc.field(default_factory=list)
     cfg_consumers:    List['CfgConsumer'] = dc.field(default_factory=list)
     cfg_connections:  List['CfgConnection'] = dc.field(default_factory=list)
+    cfg_listeners:    List['CfgListener'] = dc.field(default_factory=list)
     # Process blocks (``proc_block.py``): the ``step`` and ``comb`` blocks
     # of a class-written component, with their domains and reset branches.
     proc_blocks:      List['ProcBlock'] = dc.field(default_factory=list)
@@ -275,8 +278,13 @@ class DataTypeBundle(DataTypeStruct):
 
     A bundle may be generic: ``template_params`` (type parameters, say
     ``T``), members typed ``DataTypeRef(T)``, and each field of the bundle
-    type giving their values in its ``inst_params``."""
+    type giving their values in its ``inst_params``.
+
+    ``bundle_protocol``: the protocol the bundle class names
+    (``fw_bundle_protocol``), as ``DataTypeClass.bundle_protocol``; in a
+    generic bundle, written over its ``template_params``."""
     template_params: List['TemplateParam'] = dc.field(default_factory=list)
+    bundle_protocol: Optional['ProtocolRef'] = dc.field(default=None)
 
 if TYPE_CHECKING:
     from .fields import Bind, Pool, PoolBind

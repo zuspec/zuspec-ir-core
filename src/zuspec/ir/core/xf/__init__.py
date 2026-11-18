@@ -10,6 +10,8 @@ from .validate import ScenarioValidator, UnsupportedConstructError
 from .pss_lower import PSSToScenarioPass
 from .coro_fsm import CoroutineFSMPass, FSMForm, FSMBlock
 from .pretty import dump_module
+from .width_params import (TypeParamWidthPass, TypeParamWidthReport, WidthParam,
+                           KeptTypeParam, lower_type_params_to_widths)
 
 __all__ = [
     "ScenarioValidator",
@@ -19,4 +21,9 @@ __all__ = [
     "FSMForm",
     "FSMBlock",
     "dump_module",
+    "TypeParamWidthPass",
+    "TypeParamWidthReport",
+    "WidthParam",
+    "KeptTypeParam",
+    "lower_type_params_to_widths",
 ]
