@@ -9,6 +9,9 @@ if TYPE_CHECKING:
     from .fields import Field
     from .domain import (DomainDecl, DomainAssoc, DomainDriver, DomainWaiver, DomainRef,
                          DomainPortName, DomainProvides)
+    from .protocol_hub import (ProtocolRef, ProtocolConverter, BundleProtocol, ApiEndpoint,
+                               ApiConnection, CfgPublisher, CfgConsumer, CfgConnection)
+    from .proc_block import ProcBlock
     from .stmt import Stmt, Arguments
     from .activity import ActivitySequenceBlock
 
@@ -101,6 +104,10 @@ class DataTypeStruct(DataType):
 class DataTypeClass(DataTypeStruct):
     """Classes are a polymorphic extension of Structs"""
     activity_ir: Optional['ActivitySequenceBlock'] = dc.field(default=None)
+    # Protocols (``protocol_hub.py``): the APIs (``DataTypeProtocol`` names)
+    # the class implements, and a bundle class's protocol.
+    implements:  List[str] = dc.field(default_factory=list)
+    bundle_protocol: Optional['ProtocolRef'] = dc.field(default=None)
 
 @dc.dataclass(kw_only=True)
 class DataTypeAction(DataTypeClass):
@@ -181,6 +188,19 @@ class DataTypeComponent(DataTypeClass):
     domain_waivers:   List['DomainWaiver'] = dc.field(default_factory=list)
     domain_port_names: List['DomainPortName'] = dc.field(default_factory=list)
     domain_provides:  List['DomainProvides'] = dc.field(default_factory=list)
+    # Protocols (``protocol_hub.py``): what a transactor or abstractor
+    # converts; the protocol of each bundle instance; API endpoints and
+    # connections; configuration publishers, consumers and connections.
+    converter:        Optional['ProtocolConverter'] = dc.field(default=None)
+    bundle_protocols: List['BundleProtocol'] = dc.field(default_factory=list)
+    api_endpoints:    List['ApiEndpoint'] = dc.field(default_factory=list)
+    api_connections:  List['ApiConnection'] = dc.field(default_factory=list)
+    cfg_publishers:   List['CfgPublisher'] = dc.field(default_factory=list)
+    cfg_consumers:    List['CfgConsumer'] = dc.field(default_factory=list)
+    cfg_connections:  List['CfgConnection'] = dc.field(default_factory=list)
+    # Process blocks (``proc_block.py``): the ``step`` and ``comb`` blocks
+    # of a class-written component, with their domains and reset branches.
+    proc_blocks:      List['ProcBlock'] = dc.field(default_factory=list)
 
 
 @dc.dataclass(kw_only=True)
@@ -553,6 +573,11 @@ class DataTypeParameterized(DataType):
     Represents the uninstantiated template (e.g., reg_c itself)
     """
     template_params : List[TemplateParam] = dc.field(default_factory=list)
+    #: The template's body (an SV parameterized class: its ``DataTypeClass``;
+    #: a parameterized interface class: its ``DataTypeProtocol``), written over the parameters: a type parameter is a ``DataTypeRef`` to
+    #: its name, a width a ``width_expr`` over the value parameters. None
+    #: when the template has no body in the IR.
+    body : Optional[DataType] = dc.field(default=None)
 
 
 @dc.dataclass(kw_only=True)

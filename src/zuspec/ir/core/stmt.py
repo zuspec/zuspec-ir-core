@@ -18,6 +18,9 @@ class Arg(Base):
     #: The argument's type, when the front end resolved one (``annotation``
     #: holds the type as written, if anything).
     datatype: Optional[Any] = dc.field(default=None)
+    #: The argument's direction (a ``fields.SignalDirection``: ``INPUT``,
+    #: ``OUTPUT`` or ``INOUT``), when the source gives one; None otherwise.
+    direction: Optional[Any] = dc.field(default=None)
 
 @dc.dataclass(kw_only=True)
 class Arguments(Base):

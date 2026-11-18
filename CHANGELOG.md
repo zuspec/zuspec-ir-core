@@ -3,6 +3,7 @@
 ## Unreleased (Phase 0: results as IR)
 
 ### Added
+- **`Arg.direction`** (fw-hdl protocol-kit K5.2c): an argument's direction, a `SignalDirection`, or None.
 - **Anchors** (`anchor.py`, `docs/anchors.md`): stable, name-first identity for every type, member, statement and expression.
   - `assign_anchors` and `AnchorTable` (format `zuspec.anchor-table` v2), with scope hashes.
   - Named locals: `v:<name>`, `v:<name>+K`.
@@ -20,6 +21,9 @@
   - Later (D5): `DomainPortName` and `DomainProvides`, in the new `DataTypeComponent.domain_port_names` and `domain_provides`; `DataTypeDomainKind.pin_default`, and `port_names` keyed by `port_name_key(assoc, attr)`.
   - Later (D6): `DataTypeDomainKind.polarity`, the pin attribute that is a net's polarity, for the inverted nets of emission.
   - Later (D8): `DataTypeComponent.clock_domain`/`reset_domain` (a front end's own domain objects) are no longer serialized; the domain IR is what a serialized component has. `Serializer` and `JsonConverter` skip a field whose metadata has `serialize: False`.
+- **Protocol IR** (`protocol_hub.py`, fw-hdl protocol-kit-plan §8.11): an API is the existing `DataTypeProtocol`. `DataTypeProtocolHub` (a protocol family, stored once in `type_m`: template params, `apis` by `ProtoDir`, `cfg_type`, static `functions`, `xfer_time`/`mismatch`), `ProtocolRef` (a specialization: family and named params), `ProtocolApi`, `ProtocolConverter` (transactor or abstractor), `BundleProtocol`, `ApiEndpoint`, `ApiConnection`, `CfgPublisher`, `CfgConsumer` and `CfgConnection`. `DataTypeClass` gains `implements` and `bundle_protocol`; `DataTypeComponent` gains `converter`, `bundle_protocols`, `api_endpoints`, `api_connections`, `cfg_publishers`, `cfg_consumers` and `cfg_connections`. All of it round-trips through the serializer.
+- **Process-block IR** (`proc_block.py`, fw-hdl core-layer2 §7): `ProcBlock` (a class-written component's `step` or `comb` block, `ProcKind`: its function and body, the `clock` and `reset` `DomainRef`s of a step block, its `reset_body` from `reset_state()`, and the paths it `writes`) in the new `DataTypeComponent.proc_blocks`; `ExprInReset`, a reset domain's assertion in a lowered body. Round-trips through the serializer.
+- **`DataTypeParameterized.body`** (fw-hdl protocol-kit-plan K5.2): a template's body (an SV parameterized class), written over its parameters.
 - **JSON Schemas** for all four formats (`schemas/`, `docs/formats.md`), and `jsonschema` as a `test` extra.
 
 ### Changed

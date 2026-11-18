@@ -80,6 +80,11 @@ from .domain import (
     DomainRef, DomainDecl, DomainAssoc, DomainDriver, DomainWaiver,
     DomainPortName, DomainProvides, port_name_key,
 )
+from .protocol_hub import (
+    ProtoDir, ProtocolRef, ProtocolApi, DataTypeProtocolHub, ProtocolConverter,
+    BundleProtocol, ApiEndpoint, ApiConnection, CfgPublisher, CfgConsumer, CfgConnection,
+)
+from .proc_block import ProcKind, ProcBlock, ExprInReset
 from .expr import (
     Expr, BinOp, UnaryOp, BoolOp, CmpOp, AugOp,
     ExprBin, ExprRef, ExprConstant, int_literal_type, TypeExprRefSelf, TypeExprRefSuper, TypeExprRefTraversed,
@@ -191,6 +196,9 @@ __all__ = [
     "DomainRel","DomainSeverity","DomainDerivDecl","DataTypeDomainKind","DataTypeDomain",
     "DomainRef","DomainDecl","DomainAssoc","DomainDriver","DomainWaiver",
     "DomainPortName","DomainProvides","port_name_key",
+    "ProtoDir","ProtocolRef","ProtocolApi","DataTypeProtocolHub","ProtocolConverter",
+    "BundleProtocol","ApiEndpoint","ApiConnection","CfgPublisher","CfgConsumer","CfgConnection",
+    "ProcKind","ProcBlock","ExprInReset",
     "DataTypeExpr","DataTypeEnum","DataTypeString","DataTypeChandle",
     "DataTypeList","DataTypeArray","DataTypeMap","DataTypeSet",
     "DataTypeLock","DataTypeEvent","DataTypeMemory",
