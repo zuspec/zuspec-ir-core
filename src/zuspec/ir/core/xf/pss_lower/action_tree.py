@@ -59,7 +59,7 @@ from . import defaults as D
 from .constraints import (constraint_sites, default_path, expr_to_constraints,
                           resolve_refs, slot_resolver, stmt_to_constraints,
                           type_constraints)
-from .layout import (domain_expr, is_ref, leaf_domain, object_layout, resolve,
+from .layout import (action_fields, domain_expr, is_ref, leaf_domain, object_layout, resolve,
                      struct_functions, subst_names, object_leaves)
 from .pools import PoolTable
 
@@ -244,8 +244,8 @@ class Layouts:
     def _build(self, qname: str) -> TypeLayout:
         dt = self.types[qname]
         lay = TypeLayout(qname=qname, dt=dt,
-                         own=object_layout(getattr(dt, "fields", []) or [], self.types))
-        for f in getattr(dt, "fields", []) or []:
+                         own=object_layout(action_fields(dt, self.types), self.types))
+        for f in action_fields(dt, self.types):
             tq = self.handle_type(f)
             if tq is None:
                 continue
@@ -880,7 +880,7 @@ class TreeBuilder:
         outputs = []
         for node in tree.nodes:
             lay = self._lay[node.id]
-            for f in getattr(lay.dt, "fields", []) or []:
+            for f in action_fields(lay.dt, self.layouts.types):
                 if not is_ref(f):
                     continue
                 leaves = [(node.base + i, leaf) for i, leaf in enumerate(lay.own)

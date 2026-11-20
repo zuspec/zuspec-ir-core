@@ -36,7 +36,7 @@ from ...data_type import DataTypeClass
 from ...scenario import ScCoroutine, ScSolveProblem, ScSolveVar
 from ..validate import UnsupportedConstructError
 from . import defaults as D
-from .layout import (domain_expr, is_ref, is_struct, leaf_domain, object_layout,
+from .layout import (action_fields, domain_expr, is_ref, is_struct, leaf_domain, object_layout,
                      resolve, struct_fields, struct_functions)
 
 
@@ -59,7 +59,7 @@ def collect_solve_problem(coro: ScCoroutine, dt: DataTypeClass,
     tree: it belongs to the tree's cone (``action_tree``), which solves it
     with lookahead, so it is left out here.
     """
-    leaves = object_layout(dt.fields, types)
+    leaves = object_layout(action_fields(dt, types), types)
     rand_leaves = [(i, leaf) for i, leaf in enumerate(leaves) if leaf.rand]
 
     # dotted leaf path -> object slot, for reference resolution.
@@ -135,7 +135,10 @@ def is_pending_constraint(f) -> bool:
     """
     if getattr(f, "name", None) in LIFECYCLE_FUNCS:
         return False
-    return not (getattr(f, "metadata", None) or {}).get("_is_generic_constraint")
+    meta = getattr(f, "metadata", None) or {}
+    # A function declared in an action (a pssc extension) is called, not
+    # solved: ``ScenarioModule.functions`` has it.
+    return not (meta.get("_is_generic_constraint") or meta.get("action_function"))
 
 
 def type_constraints(dt) -> list:
@@ -155,7 +158,7 @@ def constraint_sites(pending, dt, types):
     """
     for fn in pending:
         yield (), fn
-    yield from _struct_sites(getattr(dt, "fields", []) or [], types, ())
+    yield from _struct_sites(action_fields(dt, types), types, ())
 
 
 def _struct_sites(fields, types, prefix):

@@ -19,13 +19,13 @@ from ...scenario import (
     ScSeq, ScInvoke, ScLoop, ScIf, ScMatch, ScMatchCase, ScAtomic,
     ScPar, ScSelect, ScSelectBranch, ScImport, ScImportDecl,
 )
-from ...stmt import StmtExpr, StmtAssign
+from ...stmt import Stmt, StmtExpr, StmtAssign, StmtSuper
 from ...expr import (Expr, ExprCall, ExprAttribute, TypeExprRefSelf, TypeExprRefTraversed,
                      ExprRefUnresolved)
 from ..validate import ScenarioValidator, UnsupportedConstructError
 from .constraints import (LIFECYCLE_FUNCS, collect_solve_problem,
                           is_pending_constraint)
-from .layout import object_layout, prefix_self, subst_names
+from .layout import action_fields, object_layout, struct_chain, prefix_self, subst_names
 from .action_tree import Layouts, build_tree
 from .comp_tree import CompLayouts, build_comp_tree
 
@@ -33,6 +33,20 @@ _log = logging.getLogger("zuspec.ir.xf.pss_lower")
 
 _LIFECYCLE_FUNCS = LIFECYCLE_FUNCS
 _is_pending_constraint = is_pending_constraint
+
+
+def _holds_super(node) -> bool:
+    """Does statement *node* hold a ``super;`` below its top level?"""
+    for f in dc.fields(node) if dc.is_dataclass(node) else ():
+        v = getattr(node, f.name)
+        for x in (v if isinstance(v, (list, tuple)) else [v]):
+            if isinstance(x, StmtSuper):
+                return True
+            if isinstance(x, Stmt) or (dc.is_dataclass(x) and
+                                       type(x).__name__.startswith("Stmt")):
+                if _holds_super(x):
+                    return True
+    return False
 
 
 def _get_type_map(ctx: Any) -> Dict[str, Any]:
@@ -57,7 +71,7 @@ def _field_layout(dt: Any, types: Dict[str, Any]) -> List[ScField]:
     attribute flattened to its leaves (``layout.object_layout``)."""
     return [ScField(name=leaf.name, slot=i, datatype=leaf.datatype, rand=leaf.rand)
             for i, leaf in enumerate(
-                object_layout(getattr(dt, "fields", []) or [], types))]
+                object_layout(action_fields(dt, types), types))]
 
 
 def _self_path(path) -> Any:
@@ -75,7 +89,7 @@ def _init_block(dt: Any, types: Dict[str, Any]) -> Optional[ScExecBlock]:
     attribute's initial value is applied too; its solve overwrites it.
     """
     stmts = []
-    for leaf in object_layout(getattr(dt, "fields", []) or [], types):
+    for leaf in object_layout(action_fields(dt, types), types):
         init = getattr(leaf.field, "initial_value", None)
         if init is not None:
             # A struct field's initializer is written against the struct.
@@ -261,7 +275,9 @@ class PSSToScenarioPass:
             return any(self._comps.is_a(t, owner) for t in placed)
         owned = [(q, dt) for (q, dt) in actions
                  if q.rsplit("::", 1)[0] == root]
-        if not owned:
+        # A component with no actions can still be entered at its functions
+        # (a fixture of test functions, pssc P1.3).
+        if not owned and module.comp_tree is None:
             raise ValueError("root component %r owns no actions" % root)
         owned += [(q, dt) for (q, dt) in actions
                   if q.rsplit("::", 1)[0] != root and runs(q.rsplit("::", 1)[0])]
@@ -367,6 +383,14 @@ class PSSToScenarioPass:
         out: Dict[str, Any] = dict(getattr(ctx, "functions", {}) or {})
         for qname, dt in type_map.items():
             if not isinstance(dt, DataTypeComponent):
+                # An action's own functions (a pssc extension), inherited
+                # ones included: ``<action>::f``, called with the action's
+                # object as ``self``. One declared with no body is left out.
+                if "::" in qname and _is_action(dt):
+                    for f in getattr(dt, "functions", []) or []:
+                        meta = getattr(f, "metadata", None) or {}
+                        if meta.get("action_function") and not meta.get("abstract"):
+                            out.setdefault(f"{qname}::{f.name}", f)
                 continue
             for f in getattr(dt, "functions", []) or []:
                 meta = getattr(f, "metadata", None) or {}
@@ -438,21 +462,67 @@ class PSSToScenarioPass:
         pre_block: Optional[ScExecBlock] = None
         post_block: Optional[ScExecBlock] = None
         pending = []
-        for f in dt.functions:
-            fname = getattr(f, "name", None)
-            if fname == "body":
-                # Split the exec body at blocking-import calls (each becomes a
-                # ScImport suspend point between straight-line ScExecBlocks).
-                body_ops = self._lower_exec_stmts(f.body, "body")
-            elif fname == "pre_solve":
-                pre_block = ScExecBlock(kind="pre_solve", stmts=list(f.body))
-            elif fname == "post_solve":
-                post_block = ScExecBlock(kind="post_solve", stmts=list(f.body))
-            elif _is_pending_constraint(f):
-                # A named constraint block (e.g. addr_aligned).  Carried until
-                # Phase 3 folds it into a ScSolveProblem.
-                pending.append(f)
+        # Named constraint blocks (e.g. addr_aligned), the bases' too, a
+        # derived block replacing a base's of the same name (LRM 16.1.3).
+        # Carried until Phase 3 folds them into a ScSolveProblem.
+        try:
+            chain = struct_chain(dt, self._type_map)
+        except UnsupportedConstructError:
+            chain = [dt]
+        for t in chain:
+            for f in getattr(t, "functions", []) or []:
+                if _is_pending_constraint(f):
+                    name = getattr(f, "name", None)
+                    pending[:] = [g for g in pending
+                                  if not name or getattr(g, "name", None) != name]
+                    pending.append(f)
+        body = self._exec_stmts(dt, "body")
+        if body is not None:
+            # Split the exec body at blocking-import calls (each becomes a
+            # ScImport suspend point between straight-line ScExecBlocks).
+            body_ops = self._lower_exec_stmts(body, "body")
+        pre = self._exec_stmts(dt, "pre_solve")
+        if pre is not None:
+            pre_block = ScExecBlock(kind="pre_solve", stmts=pre)
+        post = self._exec_stmts(dt, "post_solve")
+        if post is not None:
+            post_block = ScExecBlock(kind="post_solve", stmts=post)
         return pre_block, post_block, body_ops, pending
+
+    def _exec_stmts(self, dt, kind: str) -> Optional[List]:
+        """The statements exec block *kind* of action *dt* runs (LRM 17.1):
+        its own block, else the nearest base's; each top-level ``super;`` in
+        it replaced by the base's block, expanded the same way. None if no
+        type in the chain declares one."""
+        seen: List[Any] = []
+        while dt is not None:
+            if any(t is dt for t in seen):
+                raise UnsupportedConstructError(
+                    "action %r inherits from itself" % getattr(dt, "name", "?"),
+                    loc=getattr(dt, "loc", None))
+            seen.append(dt)
+            sup = getattr(dt, "super", None)
+            base = (self._type_map.get(getattr(sup, "ref_name", None))
+                    if sup is not None else None)
+            fn = next((f for f in getattr(dt, "functions", []) or []
+                       if getattr(f, "name", None) == kind), None)
+            if fn is None:
+                dt = base
+                continue
+            out: List = []
+            for st in fn.body:
+                if isinstance(st, StmtSuper):
+                    if base is not None:
+                        out.extend(self._exec_stmts(base, kind) or [])
+                else:
+                    if _holds_super(st):
+                        raise UnsupportedConstructError(
+                            "`super;` inside a statement of exec %s: only a "
+                            "top-level `super;` is supported" % kind,
+                            loc=getattr(st, "loc", None))
+                    out.append(st)
+            return out
+        return None
 
     @staticmethod
     def _lifecycle(pre_block, post_block, main: List) -> List:
@@ -767,7 +837,7 @@ class PSSToScenarioPass:
             written = None
             if s.type_qname is None:
                 # Hand-built IR: the handle's declared type, as written.
-                for f in getattr(self._cur_action, "fields", []) or []:
+                for f in action_fields(self._cur_action, self._type_map):
                     if f.name == s.handle:
                         written = getattr(getattr(f, "datatype", None),
                                           "ref_name", None)

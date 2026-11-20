@@ -22,6 +22,10 @@ bottom-up: the order LRM Example 281 lists.
 ``2 + D`` slots of the instance that declares it: ``c.$count``, ``c.$head``
 and ``c.$buf0`` .. ``c.$buf<D-1>``, a ring of scalar elements, all 0 at
 construction. A channel whose element is not a scalar stays one opaque slot.
+
+**A register group's handle is state of its instance.** A
+``reg_group_c`` (21.14.4) has one more slot, ``$handle``, after its fields:
+the address ``set_handle()`` binds it to, 0 at construction.
 """
 from __future__ import annotations
 
@@ -29,12 +33,22 @@ import dataclasses as dc
 from typing import Any, Dict, List, Optional, Tuple
 
 from ... import expr as E
-from ...data_type import (DataTypeArray, DataTypeChannel, DataTypeComponent,
-                          DataTypeInt, DataTypeRef)
+from ...data_type import (DataTypeArray, DataTypeChandle, DataTypeChannel,
+                          DataTypeComponent, DataTypeInt, DataTypeRef,
+                          DataTypeRegister, DataTypeRegisterGroup)
 from ...scenario import ScCompInit, ScCompInstance, ScComponentTree, ScField
 from ...stmt import StmtAssign
 from ..validate import UnsupportedConstructError
 from .layout import Leaf, field_leaves, is_struct, prefix_self, resolve
+
+
+def _type_text(dt) -> str:
+    """Short text for register value type *dt*, for a type-map key."""
+    if isinstance(dt, DataTypeInt):
+        return "%s[%d]" % ("int" if dt.signed else "bit", dt.bits)
+    if isinstance(dt, DataTypeRef):
+        return dt.ref_name
+    return getattr(dt, "name", None) or type(dt).__name__
 
 
 def _loc(n):
@@ -58,6 +72,10 @@ def channel_leaves(f, types) -> Optional[List[Leaf]]:
            Leaf((f.name, "$head"), CHANNEL_INDEX, f, False)]
     out += [Leaf((f.name, "$buf%d" % i), elem, f, False) for i in range(dt.depth)]
     return out
+
+
+#: the slot of a register group's address handle
+HANDLE = "$handle"
 
 
 @dc.dataclass
@@ -124,7 +142,25 @@ class CompLayouts:
         tq = getattr(f, "type_qname", None)
         if tq is not None and isinstance(self.types.get(tq), DataTypeComponent):
             return tq
+        if not any(t is dt for t in self.types.values()):
+            return self._add_anonymous(dt)
         return self.qname_of(dt)
+
+    def _add_anonymous(self, dt) -> str:
+        """A key in the type map for *dt*, a specialization the type map
+        does not name: a field declared ``reg_c<bit[32], READWRITE, 32> R;``
+        (21.14) carries its own ``reg_c<None>`` object."""
+        base = getattr(dt, "name", None) or "anon"
+        if isinstance(dt, DataTypeRegister):
+            base = "reg_c<%s, %s, %s>" % (
+                _type_text(dt.register_value_type),
+                getattr(dt.access_mode, "name", dt.access_mode), dt.size_bits)
+        key, n = base, 1
+        while key in self.types:
+            n += 1
+            key = "%s#%d" % (base, n)
+        self.types[key] = dt
+        return key
 
     def chain(self, qname: str) -> List[Any]:
         """Component type *qname* and its bases, base first."""
@@ -207,6 +243,8 @@ class CompLayouts:
                     keys = [f.name]
                 for key in keys:
                     self._place(lay, key, self.get(tq, loc=_loc(f)))
+        if isinstance(lay.dt, DataTypeRegisterGroup):
+            lay.slots.append((HANDLE, Leaf((HANDLE,), DataTypeChandle(), None, False)))
         return lay
 
     @staticmethod

@@ -102,6 +102,20 @@ def struct_fields(dt: Any, types: Types) -> List[Any]:
     return out
 
 
+def action_fields(dt: Any, types: Types) -> List[Any]:
+    """The fields of action (or other class) *dt*, its bases' first: an
+    attribute is inherited (LRM 10.2). A base the layout does not know
+    (``types`` incomplete) ends the chain."""
+    out: List[Any] = []
+    try:
+        chain = struct_chain(dt, types)
+    except UnsupportedConstructError:
+        chain = [dt]
+    for t in chain:
+        out.extend(getattr(t, "fields", []) or [])
+    return out
+
+
 def struct_functions(dt: Any, types: Types) -> List[Any]:
     """The functions (constraint and exec blocks) of struct *dt*, bases' first."""
     out = []
