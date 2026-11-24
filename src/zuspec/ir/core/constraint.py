@@ -69,8 +69,14 @@ class ConstraintUnique(Constraint):
 
 @dc.dataclass(kw_only=True)
 class ConstraintSoft(Constraint):
-    """``soft expr;`` — a soft constraint that yields to harder ones."""
+    """``soft expr;`` — a soft constraint that yields to harder ones.
+
+    ``rank`` orders softs by PSS priority within one solve problem: on a
+    conflict, the soft with the higher rank holds and the lower is dropped.
+    Equal ranks: the later in the problem's constraint list holds.
+    """
     expr: Expr = dc.field()
+    rank: int = dc.field(default=0)
 
 
 @dc.dataclass(kw_only=True)

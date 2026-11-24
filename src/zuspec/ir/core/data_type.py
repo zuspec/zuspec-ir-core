@@ -86,7 +86,7 @@ class DataTypeStruct(DataType):
     is_abstract : bool = dc.field(default=False)
     flow_kind : Optional[FlowKind] = dc.field(default=None)
     has_initial_constraint : bool = dc.field(default=False)  # True when a ConstraintBlock references the `initial` keyword
-    covergroups : List = dc.field(default_factory=list)  # list[PssCoverGroup]
+    covergroups : List = dc.field(default_factory=list)  # list[coverage.CovergroupDef]
     #: A packed struct: its members are laid out as one integral value, the
     #: first member in the most significant bits (SV ``struct packed``).
     packed : bool = dc.field(default=False)
@@ -95,6 +95,14 @@ class DataTypeStruct(DataType):
     #: is declared under there (``prm_pkg::cfg_t``). A back end refers to the
     #: type by that name and does not declare it. None: the IR declares it.
     extern_name : Optional[str] = dc.field(default=None)
+    #: For a template specialization (``executor_c<my_trait_s>``, named
+    #: ``executor_pkg::executor_c_my_trait_s``), the template's qualified
+    #: name: it is still that type to a check by name (``is_a``).
+    template : Optional[str] = dc.field(default=None)
+    #: Its type arguments, in order, as qualified type names
+    #: (``["my_trait_s", "addr_reg_pkg::alloc_base_mode_s"]``); a value
+    #: argument is None. Empty when not a specialization.
+    template_args : List[Optional[str]] = dc.field(default_factory=list, compare=False)
 #    constraints
 
 @dc.dataclass(kw_only=True)
@@ -290,6 +298,12 @@ class DataTypeEnum(DataType):
 class DataTypeString(DataType): ...
 
 @dc.dataclass(kw_only=True)
+class DataTypeFloat(DataType):
+    """IEEE 754 floating point (PSS §7.3): ``float32`` (binary32) or
+    ``float64`` (binary64), by ``bits``."""
+    bits: int = dc.field(default=64)
+
+@dc.dataclass(kw_only=True)
 class DataTypeChandle(DataType):
     """Opaque C handle type (PSS §7.7).
 
@@ -297,6 +311,16 @@ class DataTypeChandle(DataType):
     can hold and pass around but cannot dereference.  Maps to ``ctypes.c_void_p``
     or plain ``int`` in a Python runtime.
     """
+
+@dc.dataclass(kw_only=True)
+class DataTypeEntityRef(DataType):
+    """A ``ref T`` (PSS 3.0 7.10): a reference to an entity -- today a
+    component (``kind`` "component"), the type named by ``target`` (a
+    ``DataTypeComponent``, or a ``DataTypeRef`` naming one declared later).
+    It may be null, its default. Not ``DataTypeRef``, which is a by-name
+    placeholder for a type, not a value that refers to an entity."""
+    target: DataType = dc.field()
+    kind: str = dc.field(default="component")
 
 @dc.dataclass(kw_only=True)
 class DataTypeList(DataType):
