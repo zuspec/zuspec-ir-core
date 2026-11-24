@@ -109,6 +109,10 @@ class CoroutineFSMPass:
         out: List[ScStmt] = []
         for s in stmts:
             if isinstance(s, (ScSeq, ScAtomic)):
+                if getattr(s, "scope", None) is not None:
+                    # The block's entry stays (an empty block of its scope:
+                    # SCOPE_ENTER), since its body is inlined
+                    out.append(ScSeq(body=[], scope=s.scope))
                 out.extend(self._flatten(s.body))
             elif isinstance(s, (ScLoop, ScIf, ScMatch)):
                 if self._contains_suspend(s) and not self.allow_nested_suspend:

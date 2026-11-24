@@ -43,24 +43,27 @@ from ...expr_phase2 import ExprIfExp
 from ...activity import (
     ActivityAnonTraversal, ActivityAtomic, ActivityBind, ActivityConstraint, ActivityDoWhile,
     ActivityFieldDecl, ActivityForeach, ActivityIfElse, ActivityMatch,
-    ActivityParallel, ActivityRepeat, ActivityReplicate, ActivitySchedule,
-    ActivitySelect, ActivitySequenceBlock, ActivityTraversal, ActivityWhileDo,
+    ActivityParallel, ActivityRepeat, ActivityReplicate, ActivitySchedule, ActivitySchedulingConstraint,
+    ActivitySelect, ActivitySequenceBlock, ActivityTraversal, ActivityWhileDo, MatchCase,
 )
 from ...data_type import DataTypeArray, DataTypeClass, DataTypeComponent, DataTypeRef
 from ...fields import FieldKind
 from ...scenario import (
-    ScActionNode, ScActionTree, ScActivityScope, ScBufferPick, ScClaim, ScPool,
+    BUSY_WORD_BITS, ScActionNode, ScActionTree, ScActivityScope, ScBufferPick, ScClaim, ScPool,
     ScScopeConstraint, ScStateWrite,
     ScScopeProblem, ScScopeVar, ScTraversalSite, ScopeConstraintKind, ScopeKind,
 )
-from ...constraint import ConstraintExpr, ConstraintImplies
+from ...constraint import ConstraintExpr, ConstraintImplies, ConstraintSoft
 from ..validate import UnsupportedConstructError
 from . import defaults as D
-from .constraints import (constraint_sites, default_path, expr_to_constraints,
-                          resolve_refs, slot_resolver, stmt_to_constraints,
+from .constraints import (constraint_sites, default_path, expr_to_constraints, list_elem_domain,
+                          mentions_prev, resolve_refs, slot_resolver, stmt_to_constraints,
                           type_constraints)
 from .layout import (action_fields, domain_expr, is_ref, leaf_domain, object_layout, resolve,
                      struct_functions, subst_names, object_leaves)
+from .flow_checks import FlowChecks
+from .icl import IclTable
+from .infer import MAX_DEPTH, MAX_SLOTS, InferPlanner
 from .pools import PoolTable
 
 _LOOPS = (ActivityRepeat, ActivityForeach, ActivityDoWhile, ActivityWhileDo)
@@ -77,8 +80,34 @@ def _runs_once(s) -> bool:
             and isinstance(count.value, int) and count.value > 0)
 
 
+def _reads_prev(*xs) -> bool:
+    """Whether a constraint of action or state type *xs* (the last item
+    is the type table) reads a state object's ``prev`` (13.3)."""
+    types = xs[-1]
+
+    def walk(x) -> bool:
+        if isinstance(x, E.ExprAttribute) and x.attr == "prev":
+            return True
+        if dc.is_dataclass(x) and not isinstance(x, type):
+            return any(walk(y) for f in dc.fields(x)
+                       for y in (getattr(x, f.name) if isinstance(getattr(x, f.name), list)
+                                 else [getattr(x, f.name)]))
+        return False
+    return any(walk(s) for dt in xs[:-1] for fn in struct_functions(dt, types)
+               if (getattr(fn, "metadata", None) or {}).get("_is_constraint")
+               for s in getattr(fn, "body", []) or [])
+
+
 def _loc(n):
     return getattr(n, "loc", None)
+
+
+def _is_eq_zero(c, slot: int) -> bool:
+    """*c* is ``slot == 0`` (``false``)."""
+    e = getattr(c, "expr", None) if isinstance(c, ConstraintExpr) else None
+    return (isinstance(e, E.ExprBin) and e.op == E.BinOp.Eq
+            and isinstance(e.lhs, E.ExprRefField) and e.lhs.index == slot
+            and isinstance(e.rhs, E.ExprConstant) and not e.rhs.value)
 
 
 def _is_action_type(dt: Any) -> bool:
@@ -262,13 +291,231 @@ class Layouts:
         if act is not None:
             lay.scopes.append((ScopeKind.ACTIVITY, None))
             stmts = act.stmts if isinstance(act, ActivitySequenceBlock) else [act]
-            _Walker(self, lay).walk(stmts, "", [dict(lay.fields)], 0)
+            sizes = {f.name: f.datatype.size for f in action_fields(dt, self.types)
+                     if isinstance(f.datatype, DataTypeArray)
+                     and self.handle_type(f) is not None}
+            if sizes:
+                _pick_elements(stmts, sizes, {})
+                if not isinstance(act, ActivitySequenceBlock):
+                    dt.activity_ir = stmts[0]
+            w = _Walker(self, lay)
+            w.sched_cons = scheduling_constraints(stmts)
+            w.walk(stmts, "", [dict(lay.fields)], 0)
         rel = len(lay.own)
         for d in lay.decls:
             d.rel_base = rel
             rel += self.get(d.type_qname, loc=_loc(dt)).size
         lay.size = rel
         return lay
+
+
+def _pick_elements(stmts, sizes: Dict[str, int], counts: Dict[str, int]) -> None:
+    """Rewrite, in place, each traversal ``aa[i]`` of a handle array with a
+    computed index into ``match (i) { [0]: aa[0]; ... }``.
+
+    Each element of a handle array is its own node of the action tree; a
+    computed index picks one at run time. *counts* holds the constant counts
+    of the ``repeat (i : N)`` loops around, so an index that would run past
+    the array is refused here (an out-of-range index is an error, 8.8.2).
+    """
+    for k, s in enumerate(stmts):
+        if isinstance(s, ActivityTraversal) and s.index is not None \
+                and s.handle in sizes and not (
+                    isinstance(s.index, E.ExprConstant) and isinstance(s.index.value, int)):
+            n = sizes[s.handle]
+            var = (s.index.name if isinstance(s.index, E.ExprRefLocal) else
+                   s.index.attr if isinstance(s.index, E.ExprAttribute)
+                   and isinstance(s.index.value, E.TypeExprRefSelf) else None)
+            if var in counts and counts[var] > n:
+                raise UnsupportedConstructError(
+                    "%s[%s] runs past the end of the handle array %r (size %d): "
+                    "the loop counts to %d" % (s.handle, var, s.handle, n, counts[var]),
+                    loc=_loc(s))
+            cases = [MatchCase(pattern=E.ExprConstant(value=i),
+                               body=[dc.replace(s, index=E.ExprConstant(value=i))])
+                     for i in range(n)]
+            m = ActivityMatch(subject=s.index, cases=cases)
+            for n_ in [m] + cases + [c.body[0] for c in cases]:
+                n_.loc = getattr(s, "loc", None)
+            stmts[k] = m
+            continue
+        coll = getattr(s, "collection", None)
+        if isinstance(s, ActivityForeach) and isinstance(coll, E.ExprAttribute) \
+                and isinstance(coll.value, E.TypeExprRefSelf) and coll.attr in sizes:
+            # `foreach (h : aa)` over a handle array: a counted loop of its
+            # size, the body's `h` already read as `aa[<index>]`.
+            s = stmts[k] = ActivityRepeat(
+                count=E.ExprConstant(value=sizes[coll.attr]),
+                index_var=s.index_var, body=s.body, loc=getattr(s, "loc", None))
+        if isinstance(s, ActivityRepeat):
+            c = dict(counts)
+            if s.index_var:
+                c.pop(s.index_var, None)
+                if isinstance(s.count, E.ExprConstant) and isinstance(s.count.value, int):
+                    c[s.index_var] = s.count.value
+            _pick_elements(s.body, sizes, c)
+            continue
+        for attr in ("stmts", "body", "if_body", "else_body"):
+            sub = getattr(s, attr, None)
+            if isinstance(sub, list):
+                _pick_elements(sub, sizes, counts)
+        for br in getattr(s, "branches", None) or []:
+            _pick_elements(getattr(br, "body", None) or [], sizes, counts)
+        for case in getattr(s, "cases", None) or []:
+            _pick_elements(case.body, sizes, counts)
+
+
+def _activity_stmts(stmts):
+    """Every activity statement under *stmts*, depth first."""
+    for s in stmts or []:
+        yield s
+        for attr in ("stmts", "body", "if_body", "else_body"):
+            sub = getattr(s, attr, None)
+            if isinstance(sub, list):
+                yield from _activity_stmts(sub)
+        for br in getattr(s, "branches", None) or []:
+            yield from _activity_stmts(getattr(br, "body", None))
+        for case in getattr(s, "cases", None) or []:
+            yield from _activity_stmts(getattr(case, "body", None))
+
+
+def schedule_members(s) -> list:
+    """The members of ``schedule`` *s*: its statements that are not
+    activity constraints, binds or declarations."""
+    return [st for st in s.stmts
+            if not isinstance(st, (ActivityConstraint, ActivityBind, ActivityFieldDecl,
+                                   ActivitySchedulingConstraint))]
+
+
+def scheduling_constraints(stmts) -> list:
+    """The ``constraint sequence|parallel`` statements anywhere in an
+    activity (LRM 16.2); each applies to the schedule its targets are in."""
+    return [st for st in _activity_stmts(stmts)
+            if isinstance(st, ActivitySchedulingConstraint)]
+
+
+def _target_path(e) -> Optional[List[str]]:
+    names = []
+    while isinstance(e, E.ExprAttribute):
+        names.append(e.attr)
+        e = e.value
+    return names[::-1] or None
+
+
+def schedule_order(members, cons) -> Tuple[list, list, set]:
+    """What the scheduling constraints *cons* ask of these schedule
+    *members*: ``sequence`` edges ``(i, j)``, ``parallel`` member lists, and
+    the ids of the constraints that apply here. A constraint applies when
+    one of its targets names a member (its label, or its traversed handle);
+    v0 then needs every target to name a member of this schedule (LRM 16.2:
+    not one traversed more than once, nor a member's sub-action)."""
+    names: Dict[str, int] = {}
+    twice = set()
+    for i, m in enumerate(members):
+        for n in {getattr(m, "label", None), getattr(m, "handle", None)} - {None}:
+            if n in names:
+                twice.add(n)
+            names[n] = i
+    before, together, used = [], [], set()
+    for c in cons:
+        paths = [_target_path(t) for t in c.targets]
+        if not any(p and p[0] in names for p in paths):
+            continue
+        for p in paths:
+            if p is None or len(p) != 1 or p[0] not in names:
+                raise UnsupportedConstructError(
+                    "scheduling constraint target %r is not a member of the same "
+                    "schedule; relating sub-actions or members of different blocks "
+                    "needs the planner (P4)" % ".".join(p or ["?"]), loc=_loc(c))
+            if p[0] in twice:
+                raise UnsupportedConstructError(
+                    "scheduling constraint target %r is traversed more than once "
+                    "(LRM 16.2 c)" % p[0], loc=_loc(c))
+        idx = [names[p[0]] for p in paths]
+        used.add(id(c))
+        if c.is_parallel:
+            together.append(idx)
+        else:
+            before.extend((a, b) for a, b in zip(idx, idx[1:]) if a != b)
+    return before, together, used
+
+
+def plan_of_schedule(s, cons, types):
+    """``schedule`` *s*'s members, their plan (xf/plan) under the
+    scheduling constraints *cons* of the activity, and the ids of those that
+    apply to *s*. Raises the plan's errors (CycleError, ParallelError)."""
+    from ..plan import plan_schedule
+    members = schedule_members(s)
+    before, together, used = schedule_order(members, cons)
+    plan = plan_schedule(schedule_footprints(members, types), before, together)
+    return members, plan, used
+
+
+def schedule_footprints(members, types) -> list:
+    """The :class:`~..plan.Footprint` of each schedule member: the flow
+    objects and resources the actions it traverses (directly or through a
+    compound action's activity) exchange and claim, by type identity.
+    Raises for a member with a flow-object reference of no known kind."""
+    from ..plan import Footprint
+    out = []
+    for m in members:
+        fp, seen = Footprint(), set()
+        for st in _activity_stmts([m]):
+            qname = getattr(st, "type_qname", None)
+            if isinstance(st, (ActivityTraversal, ActivityAnonTraversal)) \
+                    and qname is not None:
+                why = _footprint(qname, types, seen, fp)
+                if why is not None:
+                    raise UnsupportedConstructError(
+                        "schedule with interacting members (%s) needs the "
+                        "planner (P3/P4, design D4)" % why, loc=_loc(st))
+        out.append(fp)
+    return out
+
+
+def _footprint(qname: str, types, seen: set, fp) -> Optional[str]:
+    """Add what action *qname* (and what its activity traverses) reads,
+    writes and claims to *fp*; why it cannot be planned, or None."""
+    if qname in seen:
+        return None
+    seen.add(qname)
+    dt = types.get(qname)
+    chain = dt
+    while chain is not None:
+        for f in getattr(chain, "fields", []) or []:
+            if f.kind not in (FieldKind.Input, FieldKind.Output,
+                              FieldKind.Lock, FieldKind.Share):
+                continue
+            ft = f.datatype
+            if isinstance(ft, DataTypeArray):       # lock R r[2]
+                ft = ft.element_type
+            if getattr(ft, "ref_name", None) is not None:
+                ft = types.get(ft.ref_name)
+            tname = id(ft)          # the object type, by identity
+            if f.kind in (FieldKind.Lock, FieldKind.Share):
+                (fp.res_lock if f.kind == FieldKind.Lock else fp.res_share).add(tname)
+                continue
+            fk = getattr(getattr(ft, "flow_kind", None), "name", None)
+            out = f.kind == FieldKind.Output
+            if fk == "BUFFER":
+                (fp.buf_out if out else fp.buf_in).add(tname)
+            elif fk == "STATE":
+                (fp.state_out if out else fp.state_in).add(tname)
+            elif fk == "STREAM":
+                (fp.stream_out if out else fp.stream_in).add(tname)
+            else:
+                return "%s has flow-object reference %r" % (qname, f.name)
+        sup = getattr(chain, "super", None)
+        chain = types.get(getattr(sup, "ref_name", None))
+    act = getattr(dt, "activity_ir", None)
+    for st in _activity_stmts(act.stmts if act is not None else []):
+        sub = (st.type_qname if isinstance(
+            st, (ActivityTraversal, ActivityAnonTraversal)) else None)
+        if sub is not None:
+            why = _footprint(sub, types, seen, fp)
+            if why is not None:
+                return why
+    return None
 
 
 class _Walker:
@@ -279,6 +526,8 @@ class _Walker:
         self.layouts = layouts
         self.lay = lay
         self.anon: Dict[str, int] = {}
+        #: the activity's scheduling constraints (LRM 16.2)
+        self.sched_cons: list = []
         #: the index variables of the (unrolled-at-run-time) loops being walked
         self.loop_vars: List[str] = []
 
@@ -390,14 +639,35 @@ class _Walker:
                  ActivityParallel: ScopeKind.PARALLEL,
                  ActivitySchedule: ScopeKind.SCHEDULE,
                  ActivityAtomic: ScopeKind.ATOMIC}
+        if isinstance(s, ActivitySchedule):
+            # Members the planner ties (xf/plan) run as one sequence, so
+            # each such group is a SEQUENCE scope: its members are ordered,
+            # not concurrent. A member the planner refuses is reported, with
+            # its location, by the scenario pass.
+            sched = self._scope(ScopeKind.SCHEDULE, scope, s, iters)
+            where: Dict[int, int] = {}
+            try:
+                members, plan, _ = plan_of_schedule(s, self.sched_cons,
+                                                    self.layouts.types)
+                for gi, group in enumerate(plan.groups):
+                    if len(group) > 1:
+                        sub = self._scope(ScopeKind.SEQUENCE, sched, s,
+                                          ("group", gi) + tuple(iters))
+                        where.update((id(members[i]), sub) for i in group)
+            except Exception:
+                where = {}
+            for st in s.stmts:
+                self.walk([st], prefix, chain, where.get(id(st), sched), iters, consts)
+            return
         if type(s) in kinds:
             self.walk(s.stmts, prefix, chain,
                       self._scope(kinds[type(s)], scope, s, iters), iters, consts)
             return
         if isinstance(s, ActivitySelect):
             for br in s.branches:
-                self.walk(br.body, prefix, chain,
-                          self._scope(ScopeKind.SELECT_BRANCH, scope, br, iters), iters, consts)
+                sub = self._scope(ScopeKind.SELECT_BRANCH, scope, br, iters)
+                if br.infeasible is None:       # a branch that can never run has no nodes
+                    self.walk(br.body, prefix, chain, sub, iters, consts)
             return
         if isinstance(s, ActivityIfElse):
             self.walk(s.if_body, prefix, chain,
@@ -445,11 +715,18 @@ def _owner(qname: str) -> str:
 class TreeBuilder:
     """Builds the :class:`ScActionTree` of one exported action."""
 
-    def __init__(self, layouts: Layouts, comps=None, root_comp: Optional[str] = None):
+    def __init__(self, layouts: Layouts, comps=None, root_comp: Optional[str] = None,
+                 claims=None):
         self.layouts = layouts
         #: ``comp_tree.CompLayouts``; None: every node runs in instance 0
         self.comps = comps
         self.root_comp = root_comp
+        #: executor claims (24.6.2.3): ``claims(action type, instance id,
+        #: [claim trait type, ...], loc)`` -> the ``(executor id, instance
+        #: id)`` of each member of the group a claim of the action matches
+        #: there; it raises for a claim that matches none (the backend's
+        #: executor groups). None: claims are not assigned
+        self.claims = claims
 
     def build(self, root: str, qname: str) -> ScActionTree:
         self.tree = ScActionTree(root=root, type_qname=qname)
@@ -471,6 +748,8 @@ class TreeBuilder:
         self._aux_reads: Dict[Tuple[int, Any], int] = {}
         #: node -> the variables those reads add to its cone
         self._aux_vars: Dict[int, List[ScScopeVar]] = {}
+        #: (node, state output ref) -> its ``prev`` object: leaf -> slot
+        self._prev: Dict[Tuple[int, str], Dict[str, int]] = {}
         #: (node, constraint) tying a read to the node's choice of instance
         self._comp_ties: List[Tuple[int, Any]] = []
         for n in self.tree.nodes:
@@ -485,8 +764,209 @@ class TreeBuilder:
         #: B5d: a picked buffer input's leaf slot -> the node's pick index
         self._pick_of: Dict[int, int] = {}
         self._flow()
+        self._exec_claims()
+        self._claim_disjoint()
         self._cones()
         return self.tree
+
+    def _claim_disjoint(self) -> None:
+        """Transparent address claims of two nodes that may run at once are
+        disjoint (F7.3c2): nodes in different branches of one ``parallel`` or
+        ``schedule``, or one inside the other (a compound's claim spans its
+        activity). A claim is one a type constraint function marks
+        ``_claim_alloc`` (its field path) and ``_claim_space`` (pssc
+        ``_place_claims``); only claims of one space are kept apart. Nodes
+        apart in a sequence may share addresses. Not covered: the iterations
+        of a ``replicate`` in a parallel (one node)."""
+        tree = self.tree
+        #: (permanent slot, constraints, owner) for claims in sequence
+        self._perm_cons: List[Tuple[int, list, int]] = []
+        claims: Dict[int, List[Tuple[str, int, int]]] = {}
+        for n in tree.nodes:
+            dt = self.layouts.types.get(n.type_qname)
+            slot = {tuple(lf.path): n.base + i for i, lf in enumerate(self._lay[n.id].own)}
+            for fn in getattr(dt, "functions", None) or ():
+                md = getattr(fn, "metadata", None) or {}
+                if md.get("_claim_space") is None:
+                    continue
+                p = tuple(md["_claim_alloc"].split("."))
+                a, s = slot.get(p + ("addr",)), slot.get(p + ("size",))
+                if a is None and s is not None:
+                    # contiguous (F7.3e): no addr to solve; the run places
+                    # it first-fit after the solve, in the ledger
+                    n.addr_contig.append((len(n.addr_claims), slot.get(p + ("alignment",)), tuple(
+                        (".".join(fp[len(p) + 1:]), sl) for fp, sl in sorted(slot.items())
+                        if fp[:len(p) + 1] == p + ("trait",) and len(fp) > len(p) + 1),
+                        # where the run writes the placed address (F7.4b)
+                        slot.get(p + ("$addr",))))
+                    n.addr_claims.append((md["_claim_space"], None, s,
+                                          slot.get(p + ("permanent",))))
+                    self._needs_cone.add(n.id)
+                elif a is not None and s is not None:
+                    claims.setdefault(n.id, []).append((md["_claim_space"], a, s))
+                    # the run's ledger keeps it apart from claims still
+                    # live when a later node is solved (F7.3d)
+                    n.addr_claims.append((md["_claim_space"], a, s,
+                                          slot.get(p + ("permanent",))))
+                    # only a cone's solve consults the ledger
+                    self._needs_cone.add(n.id)
+        if len(claims) < 2:
+            return
+        site_of: Dict[int, int] = {}
+        for st in tree.sites:
+            site_of.setdefault(st.target, st.scope)
+
+        def chain(nid):
+            # the scopes around node *nid*'s traversal, innermost first,
+            # through its owners' traversals up to the root
+            out, seen = [], set()
+            while nid in site_of and nid not in seen:
+                seen.add(nid)
+                sc = site_of[nid]
+                while sc is not None and sc not in out:
+                    out.append(sc)
+                    sc = tree.scopes[sc].parent
+                nid = tree.scopes[out[-1]].node
+            return out
+
+        def ancestors(nid):
+            out = []
+            while tree.nodes[nid].parent is not None:
+                nid = tree.nodes[nid].parent
+                out.append(nid)
+            return out
+
+        def ref(slot):
+            return E.ExprRefField(base=E.TypeExprRefSelf(), index=slot)
+
+        def ge(lhs, rhs):
+            return E.ExprBin(lhs=lhs, op=E.BinOp.GtE, rhs=rhs)
+
+        def apart(a, sa, b, sb):
+            # a starts at or after b's end, or b at or after a's end. No
+            # conjunction inside the ``||``: that needs selector variables,
+            # which a constraint added to a cone's base blob cannot declare.
+            # The claims' region bounds the sums
+            def add(x, y):
+                return E.ExprBin(lhs=ref(x), op=E.BinOp.Add, rhs=ref(y))
+            return E.ExprBin(lhs=ge(ref(a), add(b, sb)), op=E.BinOp.Or,
+                             rhs=ge(ref(b), add(a, sa)))
+
+        ids = sorted(claims)
+        chains = {nid: chain(nid) for nid in ids}
+        perm = {n.id: n.addr_claims for n in tree.nodes if n.addr_claims}
+        for i, n in enumerate(ids):
+            for m in ids[i + 1:]:
+                if n in ancestors(m):
+                    owner = n
+                else:
+                    common = [sc for sc in chains[n] if sc in set(chains[m])]
+                    if not common:
+                        continue
+                    if tree.scopes[common[0]].kind not in (
+                            ScopeKind.PARALLEL, ScopeKind.SCHEDULE):
+                        # In sequence (nodes are made in traversal order, so
+                        # n runs first): a permanent claim of n outlives it,
+                        # so m's claims keep out of it (F7.3d1b). Added in
+                        # `_constraints` only if n's permanent may be true.
+                        for sp, a, sa, ps in perm[n]:
+                            if ps is None or a is None:
+                                continue
+                            cs = [E.ExprBin(lhs=E.ExprBin(
+                                      lhs=ref(ps), op=E.BinOp.Eq,
+                                      rhs=E.ExprConstant(value=0)),
+                                  op=E.BinOp.Or, rhs=apart(a, sa, b, sb))
+                                  for sq, b, sb in claims[m] if sp == sq]
+                            if cs:
+                                self._perm_cons.append(
+                                    (ps, [ConstraintExpr(expr=e) for e in cs],
+                                     tree.scopes[common[0]].node))
+                        continue
+                    owner = tree.scopes[common[0]].node
+                cs = [ConstraintExpr(expr=apart(a, sa, b, sb))
+                      for sp, a, sa in claims[n] for sq, b, sb in claims[m] if sp == sq]
+                if cs:
+                    self._flow_cons.append((cs, ScopeConstraintKind.TYPE, owner, None))
+
+    def _exec_claims(self) -> None:
+        """A node with an executor claim (its ``$exec`` leaf) is assigned one
+        executor of the group the claim matches in the node's instance, with
+        a trait equal to the claim's: ``(comp == k && $exec == x &&
+        trait == x.trait) || ...`` over instances *k* and members *x*, the
+        members' trait fields pinned from the component object."""
+        if self.claims is None or self.comps is None:
+            return
+        types = self.layouts.types
+        root = self.comps.get(self.root_comp)
+        for n in self.tree.nodes:
+            own = self._lay[n.id].own
+            at = [i for i, lf in enumerate(own) if lf.path[-1] == "$exec"]
+            if not at:
+                continue
+            claims = [own[i].path[:-1] for i in at]
+            dts = [self._field_type(n.type_qname, p + ("trait",)) for p in claims]
+            traits = [getattr(d, "ref_name", None) or getattr(d, "name", None) or ""
+                      for d in dts]
+            insts = self._instances(n.id)
+            # the last claim: the one that is too many, or the only one
+            loc = (_loc(self._field(n.type_qname, claims[-1]))
+                   or _loc(self.layouts.types.get(n.type_qname)))
+            members = {k: self.claims(n.type_qname, k, traits, loc) for k in insts}
+            pre = claims[0] + ("trait",)
+            mine = [(".".join(lf.path[len(pre):]), n.base + i) for i, lf in enumerate(own)
+                    if lf.path[:len(pre)] == pre and len(lf.path) > len(pre)]
+            exe = E.ExprRefField(base=E.TypeExprRefSelf(), index=n.base + at[0])
+            comp = self._comp_expr(*self._comp_of(n.id))
+            inputs: Dict[int, int] = {}
+            terms = []
+            for k in insts:
+                for row, x in members[k]:
+                    if x == 0:
+                        base, tq = 0, self.root_comp
+                    else:
+                        sub = next(s for s in root.subs.values() if s.inst == x)
+                        base, tq = sub.slot, sub.type_qname
+                    lay = self.comps.get(tq)
+                    conj = [E.ExprBin(lhs=exe, op=E.BinOp.Eq, rhs=E.ExprConstant(value=row))]
+                    if len(insts) > 1:
+                        conj.insert(0, E.ExprBin(lhs=comp, op=E.BinOp.Eq,
+                                                 rhs=E.ExprConstant(value=k)))
+                    for name, slot in mine:
+                        read = base + lay.slot_of("trait." + name)
+                        if read not in inputs:
+                            dom = leaf_domain(lay.slots[lay.slot_of("trait." + name)][1],
+                                              types)
+                            inputs[read] = self._new_aux(n.id)
+                            self._aux_vars.setdefault(n.id, []).append(ScScopeVar(
+                                name="%s$exec@%d" % ((n.path + ".") if n.path else "", read),
+                                node=n.id, slot=inputs[read], width=dom.width,
+                                signed=dom.signed, rand=False, comp_read=read))
+                        conj.append(E.ExprBin(
+                            lhs=E.ExprRefField(base=E.TypeExprRefSelf(), index=slot),
+                            op=E.BinOp.Eq,
+                            rhs=E.ExprRefField(base=E.TypeExprRefSelf(),
+                                               index=inputs[read])))
+                    terms.append(conj[0] if len(conj) == 1 else
+                                 E.ExprBool(op=E.BoolOp.And, values=conj))
+            self._needs_cone.add(n.id)
+            self._comp_ties.append((n.id, ConstraintExpr(
+                expr=terms[0] if len(terms) == 1 else
+                E.ExprBool(op=E.BoolOp.Or, values=terms))))
+
+    def _field_type(self, qname: str, path: Tuple[str, ...]) -> Any:
+        """The declared type (unresolved) of attribute *path* of action *qname*."""
+        return self._field(qname, path).datatype
+
+    def _field(self, qname: str, path: Tuple[str, ...]) -> Any:
+        """The declaration of attribute *path* of action *qname*."""
+        types = self.layouts.types
+        fields, f = action_fields(types.get(qname), types), None
+        for name in path:
+            f = next(f for f in fields if f.name == name)
+            # a resource's `trait` is in its executor_claim_s base (Ex 294)
+            sub = resolve(f.datatype, types)
+            fields = action_fields(sub, types) if getattr(sub, "fields", None) is not None else []
+        return f
 
     def _candidates(self, qname: str, parent: Optional[int], loc) -> List[int]:
         if self.comps is None:
@@ -504,10 +984,11 @@ class TreeBuilder:
     # -- nodes, scopes, sites -------------------------------------------------
 
     def _node(self, lay: TypeLayout, base: int, path: str, parent: Optional[int],
-              decl_scope: Optional[int], activity_parent: Optional[int], loc=None) -> int:
+              decl_scope: Optional[int], activity_parent: Optional[int], loc=None,
+              comp: Optional[List[int]] = None) -> int:
         tree = self.tree
         nid = len(tree.nodes)
-        cands = self._candidates(lay.qname, parent, loc)
+        cands = comp if comp is not None else self._candidates(lay.qname, parent, loc)
         tree.nodes.append(ScActionNode(id=nid, path=path, type_qname=lay.qname,
                                        base=base, size=len(lay.own), parent=parent,
                                        decl_scope=decl_scope, comp=cands))
@@ -584,6 +1065,8 @@ class TreeBuilder:
         """The absolute slot *path* names from node *nid*, or None."""
         if len(path) > 1 and path[0] == "comp":
             return self._comp_attr(nid, tuple(path[1:]))
+        if len(path) > 2 and path[1] == "prev" and (nid, path[0]) in self._prev:
+            return self._prev[(nid, path[0])].get(".".join(path[2:]))
         node = self.tree.nodes[nid]
         lay = self._lay[nid]
         name = ".".join(path)
@@ -726,11 +1209,20 @@ class TreeBuilder:
                 raise UnsupportedConstructError(
                     "component %r has no attribute %r (read as comp.%s in %r)"
                     % (tq, name, name, node.type_qname), loc=None)
-            dom = leaf_domain(lay.slots[off][1], self.layouts.types)
+            leaf = lay.slots[off][1]
+            dom = list_elem_domain(leaf, self.layouts.types)
+            array = dom is not None
+            if array and len(insts) > 1:
+                raise UnsupportedConstructError(
+                    "a constraint of %r reads list comp.%s, and the action may "
+                    "run in more than one component instance" % (node.type_qname, name),
+                    loc=None, remedy="read the list from one instance")
+            if not array:
+                dom = leaf_domain(leaf, self.layouts.types)
             inputs.append(ScScopeVar(
                 name=prefix if len(insts) == 1 else "%s@%d" % (prefix, k),
                 node=nid, slot=self._new_aux(nid), width=dom.width,
-                signed=dom.signed, rand=False, comp_read=base + off))
+                signed=dom.signed, rand=False, comp_read=base + off, array=array))
         self._aux_vars.setdefault(nid, []).extend(inputs)
         self._needs_cone.add(nid)
         if len(inputs) == 1:
@@ -850,34 +1342,32 @@ class TreeBuilder:
         object, claims through their pool's instances."""
         tree = self.tree
         self._pool_ids: Dict[Any, int] = {}
+        #: resource pool id -> attribute -> one root variable per instance
+        self._res_attrs: Dict[int, Dict[str, List[int]]] = {}
         self.table = (PoolTable(self.comps, self.root_comp)
                       if self.comps is not None else None)
+        #: FlowProblems no schedule of this tree can get past (14.2, 13.2 c):
+        #: lowering refuses an explicit export with one; the VM refuses an
+        #: auto-export at its first solve, so the other entries still run
+        icl = (IclTable(self.table, root_action=tree.type_qname)
+               if self.table is not None else None)
+        #: inference candidates per buffer input (M9a2; bc picks among them)
+        self._infer = InferPlanner(icl) if icl is not None else None
+        tree.flow_problems = (FlowChecks(icl).problems + self._infer.problems
+                              if icl is not None else [])
         bound = set()
-        for node in tree.nodes:
-            lay = self._lay[node.id]
-            sbase = self._scope_base[node.id]
-            for b in lay.binds:
-                # `bind a.out b.inp`: the two references are one object, so
-                # each scalar of one equals the other's (D-B13).
-                e = E.ExprBin(lhs=subst_names(b.stmt.src, b.consts), op=E.BinOp.Eq,
-                              rhs=subst_names(b.stmt.dst, b.consts))
-                cs = expr_to_constraints(e, self._resolver(node.id, b.names))
-                refs = set()
-                for c in cs:
-                    for s in self._slots(c):
-                        nid = self._owner_of(s)
-                        if nid is not None and s < self.tree.nodes[nid].base \
-                                + self.tree.nodes[nid].size:
-                            leaf = self._lay[nid].own[s - self.tree.nodes[nid].base]
-                            refs.add((nid, leaf.path[0]))
-                if len(refs) != 2 or not cs:
-                    raise UnsupportedConstructError(
-                        "bind operands must be two flow-object references of "
-                        "actions this activity traverses (11.9)", loc=_loc(b.stmt))
-                bound.update(refs)
-                self._flow_cons.append((cs, ScopeConstraintKind.ACTIVITY, node.id,
-                                        sbase + b.scope))
+        #: each bind's two (node, reference) operands
+        self._bind_pairs: List[tuple] = []
+        for node in list(tree.nodes):
+            self._binds(node, bound)
+        # M9a6: pair stream references first; an unpaired one gets
+        # inferred partners
+        unpaired = self._stream_pairing(self._stream_refs(tree.nodes), bound)
+        for node in self._infer_nodes(bound, unpaired):
+            self._binds(node, bound)
         outputs = []
+        #: (node, ref) -> (is an output, flow kind name) for the plan's flow_binds
+        flow_refs: Dict[tuple, tuple] = {}
         for node in tree.nodes:
             lay = self._lay[node.id]
             for f in action_fields(lay.dt, self.layouts.types):
@@ -886,18 +1376,229 @@ class TreeBuilder:
                 leaves = [(node.base + i, leaf) for i, leaf in enumerate(lay.own)
                           if leaf.path[0] == f.name]
                 kind = getattr(resolve(f.datatype, self.layouts.types), "flow_kind", None)
+                if kind is not None:
+                    flow_refs[(node.id, f.name)] = (f.kind == FieldKind.Output,
+                                                    kind.name.lower())
                 if f.kind in (FieldKind.Lock, FieldKind.Share):
-                    self._claim(node, f, leaves)
+                    self._claims(node, f, leaves)
                 elif kind is not None and kind.name == "STATE":
                     self._state(node, f, leaves)
                 elif kind is not None and kind.name == "STREAM":
-                    raise UnsupportedConstructError(
-                        "stream reference %r of %r is not supported on bc yet"
-                        % (f.name, node.type_qname), loc=_loc(f))
+                    if node.inferred_for is not None \
+                            and (node.id, f.name) not in self._stream_partner:
+                        raise UnsupportedConstructError(
+                            "stream %r of %r, an action that may be inferred, "
+                            "would need a partner of its own: not supported "
+                            "(18.2)" % (f.name, node.type_qname), loc=_loc(f))
                 elif f.kind == FieldKind.Input and (node.id, f.name) not in bound:
                     self._pick(node, f, leaves)
                 elif f.kind == FieldKind.Output:
                     outputs.append((node, f, leaves))
+        for pid, field, play, nid, ref in self._prev_infer_pending:
+            # M9a5c: an inferred writer's object is the next writer's prev
+            into = self._prev[(nid, ref)]
+            pn = self.tree.nodes[pid]
+            self._flow_cons.append(([ConstraintExpr(expr=E.ExprBin(
+                lhs=E.ExprRefField(base=E.TypeExprRefSelf(), index=pn.base + i),
+                op=E.BinOp.Eq,
+                rhs=E.ExprRefField(base=E.TypeExprRefSelf(),
+                                   index=into[leaf.name[len(field) + 1:]])))
+                for i, leaf in enumerate(play.own)
+                if leaf.path[0] == field and leaf.name[len(field) + 1:] in into],
+                ScopeConstraintKind.INFER, pid, None))
+        self._flow_tail(outputs, flow_refs, bound)
+
+    def _infer_nodes(self, bound, unpaired=()) -> List[ScActionNode]:
+        """M9a3: one hidden node per action that may be inferred to feed a
+        buffer input no ``bind`` connects, laid out past every slot so far
+        and traversed from the consumer by a site of its own. INFER
+        constraints make its output the input; bc turns them, and the node,
+        on only when no completed object fits. M9a4: an inferred node's own
+        buffer inputs get inferred nodes in turn, from the planner's
+        candidate tree (bounded by its limits). M9a5: a state input gets
+        one per writer of its pool, run when the pool's current object
+        cannot satisfy it (``state_infer``). M9a5c: an inferred writer that
+        reads the current object (a state input, or ``prev``) gets writers
+        of its own in turn: a state chain, which may repeat an action, at
+        most MAX_DEPTH deep and MAX_SLOTS nodes per read. M9a6: a stream
+        reference in *unpaired* gets one per possible partner
+        (``stream_infer``), whose reference INFER constraints make one
+        object with it; none possible is an error. Returns the new nodes,
+        their subtrees included."""
+        tree = self.tree
+        #: (consumer, ref) -> [(instance, [inferred node, ...])], for _pick
+        self._inferred: Dict[Tuple[int, str], List[Tuple[int, List[int]]]] = {}
+        #: (inferred writer, its output, its layout, next writer, its output):
+        #: INFER links to the next writer's ``prev``, made once it has one
+        self._prev_infer_pending: List[tuple] = []
+        #: (inferred stream partner, its reference to the node it serves)
+        self._stream_partner: set = set()
+        stream_work = []
+        for r in unpaired:
+            node, f = r[0], r[1]
+            cands = [(k, self._infer.stream_slots(k, node.type_qname, f.name))
+                     for k, _ in r[4]] if self._infer is not None else []
+            if not any(c for _, c in cands):
+                raise UnsupportedConstructError(
+                    "%s has no partner of its type and pool in a parallel or "
+                    "schedule block with it (LRM 13.2 c), and no partner can "
+                    "be inferred: no action of the component tree %s it "
+                    "(18.2)" % (r[6], "inputs" if f.kind == FieldKind.Output
+                                else "outputs"), loc=_loc(f))
+            for k, c in cands:
+                stream_work.append((node, k, f, c, "stream", 0, None, None))
+        if self._infer is None:
+            return []
+        n0 = len(tree.nodes)
+        site_of = {st.target: st for st in tree.sites}
+        #: (consumer, instance, input field, candidates, state, chain depth,
+        #: chain budget, prev of output) still to lay out
+        work = stream_work
+        for node in tree.nodes[:n0]:
+            lay = self._lay[node.id]
+            if node.id not in site_of:
+                continue
+            for f in action_fields(lay.dt, self.layouts.types):
+                if not is_ref(f) or f.kind != FieldKind.Input or (node.id, f.name) in bound:
+                    continue
+                kind = getattr(resolve(f.datatype, self.layouts.types), "flow_kind", None)
+                if kind is not None and kind.name == "STATE":
+                    # M9a5: writers inferred when the current object
+                    # cannot satisfy the read
+                    for k, _ in self._ref_pools(node, f):
+                        work.append((node, k, f,
+                                     self._infer.state_slots(k, node.type_qname, f.name), True,
+                                     0, [MAX_SLOTS], None))
+                    continue
+                if kind is None or kind.name != "BUFFER":
+                    continue
+                for k, _ in self._ref_pools(node, f):
+                    work.append((node, k, f, self._infer.slots(k, node.type_qname, f.name), False,
+                                 0, None, None))
+        while work:
+            node, k, f, cands, state, depth, budget, prev_of = work.pop(0)
+            stream, state = state == "stream", state is True
+            lay = self._lay[node.id]
+            into = {leaf.name[len(f.name) + 1:]: node.base + i
+                    for i, leaf in enumerate(lay.own) if leaf.path[0] == f.name}
+            nids = []
+            for j, c in enumerate(cands):
+                if c.explicit:
+                    continue
+                if depth:
+                    if budget[0] <= 0:
+                        break
+                    budget[0] -= 1
+                play = self.layouts.get(c.action)
+                pid = self._node(play, tree.size, "%s%s$infer%d" % (
+                    (node.path + ".") if node.path else "", f.name, len(nids)),
+                    node.id, None, None, _loc(f), comp=[c.inst - k])
+                tree.size += play.size
+                tree.nodes[pid].inferred_for = (node.id, f.name, j)
+                site = ScTraversalSite(id=len(tree.sites), owner=node.id, target=pid,
+                                       scope=site_of[node.id].scope)
+                tree.sites.append(site)
+                site_of[pid] = site
+                pn = tree.nodes[pid]
+                cs = [ConstraintExpr(expr=E.ExprBin(
+                          lhs=E.ExprRefField(base=E.TypeExprRefSelf(), index=pn.base + i),
+                          op=E.BinOp.Eq,
+                          rhs=E.ExprRefField(base=E.TypeExprRefSelf(),
+                                             index=into[leaf.name[len(c.field) + 1:]])))
+                      for i, leaf in enumerate(play.own)
+                      if leaf.path[0] == c.field
+                      and leaf.name[len(c.field) + 1:] in into]
+                # M9b1c: a consumer whose instance is a choice runs in *k*
+                # when this producer (laid out relative to *k*) feeds it
+                cslot, coff = self._comp_of(node.id)
+                if cslot is not None:
+                    cs.append(ConstraintExpr(expr=E.ExprBin(
+                        lhs=self._comp_expr(cslot, coff), op=E.BinOp.Eq,
+                        rhs=E.ExprConstant(value=k))))
+                if stream:
+                    self._stream_partner.add((pid, c.field))
+                if prev_of is not None:
+                    self._prev_infer_pending.append((pid, c.field, play, node.id, prev_of))
+                else:
+                    self._flow_cons.append((cs, ScopeConstraintKind.INFER, pid, None))
+                nids.append(pid)
+                pf = {g.name: g for g in action_fields(play.dt, self.layouts.types)}
+                for d in c.needs:
+                    work.append((pn, c.inst, pf[d.field], d.cands, False, 0, None, None))
+                if state and depth + 1 < MAX_DEPTH:
+                    # M9a5c: a writer reading the current object
+                    for g in pf.values():
+                        gk = getattr(resolve(g.datatype, self.layouts.types), "flow_kind", None)
+                        if not is_ref(g) or gk is None or gk.name != "STATE":
+                            continue
+                        if g.kind == FieldKind.Input:
+                            work.append((pn, c.inst, g,
+                                         self._infer.state_slots(c.inst, c.action, g.name),
+                                         True, depth + 1, budget, None))
+                        elif g.kind == FieldKind.Output and _reads_prev(
+                                play.dt, resolve(g.datatype, self.layouts.types),
+                                self.layouts.types):
+                            work.append((pn, c.inst, g,
+                                         self._infer.state_slots(c.inst, c.action, g.name),
+                                         True, depth + 1, budget, g.name))
+            if nids and (state or stream):
+                lst = node.stream_infer if stream else node.state_infer
+                by_ref = dict(lst)
+                if f.name not in by_ref:
+                    lst.append((f.name, []))
+                    by_ref[f.name] = lst[-1][1]
+                by_ref[f.name].append((k, nids))
+            elif nids:
+                prev = self._inferred.setdefault((node.id, f.name), [])
+                prev.append((k, nids))
+        for n in tree.nodes[n0:]:
+            if len(n.comp) > 1:
+                n.comp_slot = tree.size
+                self._aux[n.comp_slot] = n.id
+                tree.size += 1
+        return tree.nodes[n0:]
+
+    def _binds(self, node, bound) -> None:
+        """*node*'s ``bind`` statements, as equalities; adds each bound
+        ``(node, reference)`` to *bound*."""
+        lay = self._lay[node.id]
+        sbase = self._scope_base[node.id]
+        for b in lay.binds:
+            # `bind a.out b.inp`: the two references are one object, so
+            # each scalar of one equals the other's (D-B13).
+            e = E.ExprBin(lhs=subst_names(b.stmt.src, b.consts), op=E.BinOp.Eq,
+                          rhs=subst_names(b.stmt.dst, b.consts))
+            cs = expr_to_constraints(e, self._resolver(node.id, b.names))
+            refs = set()
+            for c in cs:
+                for s in self._slots(c):
+                    nid = self._owner_of(s)
+                    if nid is not None and s < self.tree.nodes[nid].base \
+                            + self.tree.nodes[nid].size:
+                        leaf = self._lay[nid].own[s - self.tree.nodes[nid].base]
+                        refs.add((nid, leaf.path[0]))
+            if len(refs) != 2 or not cs:
+                raise UnsupportedConstructError(
+                    "bind operands must be two flow-object references of "
+                    "actions this activity traverses (11.9)", loc=_loc(b.stmt))
+            bound.update(refs)
+            self._bind_pairs.append(tuple(sorted(refs)))
+            self._flow_cons.append((cs, ScopeConstraintKind.ACTIVITY, node.id,
+                                    sbase + b.scope))
+
+    def _flow_tail(self, outputs, flow_refs, bound) -> None:
+        """Stream pairs, the plan's flow binds, and the buffer outputs a
+        pick may read."""
+        tree = self.tree
+        self._stream_cons()
+        # M8b6b: the bound pairs, (output node, ref, input node, ref, kind),
+        # for a run's plan log (in memory only, like flow_problems)
+        tree.flow_binds = []
+        for a, b in self._bind_pairs:
+            if a in flow_refs and b in flow_refs and flow_refs[a][0] != flow_refs[b][0]:
+                o, i = (a, b) if flow_refs[a][0] else (b, a)
+                tree.flow_binds.append((o[0], o[1], i[0], i[1], flow_refs[o][1]))
+        tree.flow_binds.extend(self._stream_pairs)
         # An output is kept for picking only in a pool something picks from.
         picked = {pid for n in tree.nodes for pk in n.picks for _, pid in pk.pools}
         for node, f, leaves in outputs:
@@ -909,6 +1610,142 @@ class TreeBuilder:
             by_name = {leaf.name[len(f.name) + 1:]: slot for slot, leaf in leaves}
             node.buffer_writes.append(ScStateWrite(
                 ref=f.name, src=[by_name[n] for n in pool.leaves], pools=pids))
+
+    def _stream_refs(self, nodes) -> list:
+        """The ``(node, field, leaves)`` of each stream reference of *nodes*."""
+        out = []
+        for node in nodes:
+            lay = self._lay[node.id]
+            for f in action_fields(lay.dt, self.layouts.types):
+                if not is_ref(f):
+                    continue
+                kind = getattr(resolve(f.datatype, self.layouts.types), "flow_kind", None)
+                if kind is not None and kind.name == "STREAM":
+                    out.append((node, f, [(node.base + i, leaf)
+                                          for i, leaf in enumerate(lay.own)
+                                          if leaf.path[0] == f.name]))
+        return out
+
+    def _stream_pairing(self, streams, bound) -> list:
+        """Pair each stream output with one stream input (LRM 13.2 c, d,
+        M8b4): their actions run in the same ``parallel`` or ``schedule``
+        and start together. A ``bind`` names the pair; otherwise the
+        outputs and inputs of one pool and type in one such block pair up
+        in walk order. Keeps the pairs for :meth:`_stream_cons`; returns
+        the references left without a partner, for which partners are
+        inferred (M9a6): one not in such a block, or left over in it."""
+        tree = self.tree
+        site_of: Dict[int, List[int]] = {}
+        for st in tree.sites:
+            site_of.setdefault(st.target, []).append(st.scope)
+        refs = {}
+        for node, f, leaves in streams:
+            where = "stream %s %r of %r" % (
+                "output" if f.kind == FieldKind.Output else "input",
+                f.name, node.type_qname)
+            scopes = site_of.get(node.id, [])
+            if len(scopes) != 1:
+                # M9a6 infers a partner for an action traversed once only
+                raise UnsupportedConstructError(
+                    "%s: its action is traversed %s; a stream partner is "
+                    "only found for an action traversed once (M9 infers the "
+                    "rest)" % (where, "more than once" if scopes else "nowhere"),
+                    loc=_loc(f))
+            sc = scopes[0]
+            if (node.id, f.name) in bound and not self._starts_together(sc):
+                raise UnsupportedConstructError(
+                    "%s: its action must start together with the partner it "
+                    "is bound to, as a branch of a parallel or schedule block "
+                    "(LRM 13.2 d)" % where, loc=_loc(f))
+            # (instance, pool) per component instance the node may run in;
+            # a component instantiated twice gives each its own pool (M8b4b).
+            pools = self._ref_pools(node, f)
+            dt = resolve(f.datatype, self.layouts.types)
+            refs[(node.id, f.name)] = (node, f, leaves, sc, pools, dt, where)
+        pairs = []
+        for (a, b) in [r for r in self._bind_pairs if r[0] in refs or r[1] in refs]:
+            if a not in refs or b not in refs:
+                raise UnsupportedConstructError(
+                    "a stream reference is bound to a reference that is not "
+                    "a stream (13.2)", loc=_loc(refs.get(a, refs.get(b))[1]))
+            ra, rb = refs[a], refs[b]
+            if ra[1].kind == rb[1].kind or ra[3] != rb[3] or a[0] == b[0] \
+                    or not self._starts_together(ra[3]):
+                raise UnsupportedConstructError(
+                    "bound %s and %s must be an output and an input of two "
+                    "actions that start together, in one parallel or schedule "
+                    "block (LRM 13.2 d)"
+                    % (ra[6], rb[6]), loc=_loc(ra[1]))
+            pairs.append((ra, rb) if ra[1].kind == FieldKind.Output else (rb, ra))
+        groups: Dict[tuple, Tuple[list, list]] = {}
+        unpaired = []
+        for key, r in refs.items():
+            if key in bound:
+                continue
+            if not self._starts_together(r[3]):
+                unpaired.append(r)
+                continue
+            reach = frozenset((p.inst, p.name) for _, p in r[4])
+            g = groups.setdefault((r[3], reach, id(r[5])), ([], []))
+            g[0 if r[1].kind == FieldKind.Output else 1].append(r)
+        for outs, ins in groups.values():
+            unpaired.extend(outs[len(ins):] + ins[len(outs):])
+            for o, i in zip(outs, ins):
+                if o[0].id == i[0].id:
+                    raise UnsupportedConstructError(
+                        "%s: an action cannot be its own stream partner "
+                        "(LRM 13.2 d)" % o[6], loc=_loc(o[1]))
+                pairs.append((o, i))
+        self._stream_pairs = [(o[0].id, o[1].name, i[0].id, i[1].name, "stream")
+                              for o, i in pairs if (o[0].id, o[1].name) not in bound]
+        self._spairs = pairs
+        return unpaired
+
+    def _starts_together(self, sc) -> bool:
+        return self.tree.scopes[sc].kind in (ScopeKind.PARALLEL, ScopeKind.SCHEDULE)
+
+    def _stream_cons(self) -> None:
+        """Each stream pair exchanges one object: each leaf of the output
+        equals the input's."""
+        tree = self.tree
+        for o, i in self._spairs:
+            ob = {leaf.name[len(o[1].name) + 1:]: slot for slot, leaf in o[2]}
+            ib = {leaf.name[len(i[1].name) + 1:]: slot for slot, leaf in i[2]}
+            cs = [ConstraintExpr(expr=E.ExprBin(
+                lhs=E.ExprRefField(base=E.TypeExprRefSelf(), index=ob[n]),
+                op=E.BinOp.Eq,
+                rhs=E.ExprRefField(base=E.TypeExprRefSelf(), index=ib[n])))
+                for n in sorted(set(ob) & set(ib))]
+            cs.extend(self._same_pool(o, i))
+            if cs:
+                sc = o[3]
+                self._flow_cons.append((cs, ScopeConstraintKind.ACTIVITY,
+                                        tree.scopes[sc].node, sc))
+
+    def _same_pool(self, o, i) -> list:
+        """Stream partners exchange through one pool (LRM 13.2 c): where
+        either may run in several component instances, rule out each pair
+        of instances whose pools differ."""
+        co, ci = self._comp_of(o[0].id), self._comp_of(i[0].id)
+        key = lambda p: (p.inst, p.name)
+        cs = []
+        for k1, p1 in o[4]:
+            for k2, p2 in i[4]:
+                if key(p1) == key(p2) or (co == ci and k1 != k2):
+                    continue
+                if co[0] is None and ci[0] is None:
+                    raise UnsupportedConstructError(
+                        "%s and its partner %s reach different pools "
+                        "(LRM 13.2 c)" % (o[6], i[6]), loc=_loc(o[1]))
+                eo = E.ExprBin(lhs=self._comp_expr(*co), op=E.BinOp.Eq,
+                               rhs=E.ExprConstant(value=k1))
+                ni = E.ExprBin(lhs=self._comp_expr(*ci), op=E.BinOp.NotEq,
+                               rhs=E.ExprConstant(value=k2))
+                cs.append(ConstraintExpr(expr=E.ExprBin(
+                    lhs=self._comp_expr(*co), op=E.BinOp.NotEq,
+                    rhs=E.ExprConstant(value=k1))) if co == ci
+                    else ConstraintImplies(antecedent=eo, body=[ConstraintExpr(expr=ni)]))
+        return cs
 
     def _ref_pools(self, node, f, strict: bool = True) -> List[Tuple[int, Any]]:
         """``(instance, pool)`` for each component instance *node* may run
@@ -981,7 +1818,8 @@ class TreeBuilder:
             if not meta.get("_is_constraint"):
                 continue
             for s in getattr(fn, "body", []) or []:
-                cs.extend(stmt_to_constraints(s, resolve_init, fn))
+                if not mentions_prev(s):        # vacuous on the initial object
+                    cs.extend(stmt_to_constraints(s, resolve_init, fn))
         self._flow_cons.append((cs, ScopeConstraintKind.TYPE, 0, None))
         self._needs_cone.add(0)
         return pid
@@ -1009,6 +1847,18 @@ class TreeBuilder:
                     lhs=E.ExprRefField(base=E.TypeExprRefSelf(), index=by_name["initial"]),
                     op=E.BinOp.Eq, rhs=E.ExprConstant(value=0)))],
                     ScopeConstraintKind.TYPE, node.id, None))
+            # `prev` (13.3): the pool's current object when the node is
+            # solved, read like a state input.
+            dom_of = {leaf.name[len(f.name) + 1:]: leaf for _, leaf in leaves}
+            prev = self._prev.setdefault((node.id, f.name), {})
+            for name, cur in zip(pool.leaves, pool.slots):
+                dom = leaf_domain(dom_of[name], self.layouts.types)
+                aux = self._new_aux(node.id)
+                prev[name] = aux
+                self._aux_vars.setdefault(node.id, []).append(ScScopeVar(
+                    name="%s%s.prev.%s" % (node.path + "." if node.path else "", f.name, name),
+                    node=node.id, slot=aux, width=dom.width, signed=dom.signed,
+                    rand=False, live_from=cur))
             node.state_writes.append(ScStateWrite(
                 ref=f.name, src=[by_name[n] for n in pool.leaves],
                 pools=[(k, pid) for k, _ in pools]))
@@ -1029,8 +1879,11 @@ class TreeBuilder:
         by_name = {leaf.name[len(f.name) + 1:]: slot for slot, leaf in leaves}
         sel = self._new_aux(node.id)
         idx = len(node.picks)
+        infer = ([(k, self._infer.slots(k, node.type_qname, f.name)) for k, _ in pools]
+                 if self._infer is not None else [])
         node.picks.append(ScBufferPick(ref=f.name, slots=[by_name[n] for n in pool.leaves],
-                                       sel_slot=sel, pools=pids))
+                                       sel_slot=sel, pools=pids, infer=infer,
+                                       infer_nodes=self._inferred.get((node.id, f.name), [])))
         for slot in by_name.values():
             self._pick_of[slot] = idx
         self._aux_vars.setdefault(node.id, []).append(ScScopeVar(
@@ -1048,54 +1901,130 @@ class TreeBuilder:
         self._flow_cons.append((cs, ScopeConstraintKind.TYPE, node.id, None))
         self._needs_cone.add(node.id)
 
-    def _claim(self, node, f, leaves) -> None:
+    def _claims(self, node, f, leaves) -> None:
         """A claim's ``instance_id`` is one of its pool's instances (12.4),
         and not one a claim in force holds: a bit mask of those, pinned when
-        the node is solved (D-B12)."""
+        the node is solved (D-B12). An array claim (``lock R r[2]``) is one
+        claim per element; the claims of one node on one pool hold distinct
+        instances (15.2)."""
+        if any(leaf.path[1].isdigit() for _, leaf in leaves if len(leaf.path) > 2):
+            elems: Dict[str, list] = {}
+            for s, leaf in leaves:
+                elems.setdefault(leaf.path[1], []).append(
+                    (s, leaf._replace(path=leaf.path[:1] + leaf.path[2:])))
+            for i, el in elems.items():
+                self._claim(node, f, el, "%s[%s]" % (f.name, i))
+            return
+        self._claim(node, f, leaves, f.name)
+
+    def _claim(self, node, f, leaves, ref_name) -> None:
         lock = f.kind == FieldKind.Lock
         iid = next((s for s, leaf in leaves if leaf.path[1:] == ("instance_id",)), None)
-        if iid is None or any(leaf.rand and leaf.path[1:] != ("instance_id",)
-                              for _, leaf in leaves):
+        if iid is None:
             raise UnsupportedConstructError(
-                "resource %r of %r has rand attributes; only instance_id is "
-                "supported on bc yet" % (f.name, node.type_qname), loc=_loc(f))
+                "resource %r of %r has no instance_id" % (f.name, node.type_qname),
+                loc=_loc(f))
+        attrs = [(s, leaf) for s, leaf in leaves
+                 if leaf.rand and leaf.path[1:] != ("instance_id",)]
         pools = self._ref_pools(node, f)
         comp = self._comp_expr(*self._comp_of(node.id))
         ref = E.ExprRefField(base=E.TypeExprRefSelf(), index=iid)
         masks: Dict[Any, int] = {}
-        claim = ScClaim(ref=f.name, lock=lock, iid_slot=iid)
+        claim = ScClaim(ref=ref_name, lock=lock, iid_slot=iid)
         for k, p in pools:
             if not p.size or p.size < 1:
                 raise UnsupportedConstructError(
                     "resource pool %s has no instances (12.4)" % p, loc=_loc(f))
-            if p.size > 64:
-                raise UnsupportedConstructError(
-                    "resource pool %s has %d instances; bc supports at most 64 "
-                    "yet" % (p, p.size), loc=_loc(f))
             pid = self._pool(p, "resource")
             claim.pools.append((k, pid))
             if p not in masks:
-                slot = self._new_aux(node.id)
-                masks[p] = slot
-                self._aux_vars.setdefault(node.id, []).append(ScScopeVar(
-                    name="%s%s$busy@%d" % ((node.path + ".") if node.path else "",
-                                           f.name, pid),
-                    node=node.id, slot=slot, width=p.size, rand=True,
-                    busy_pool=pid, busy_lock=lock))
-            mask = E.ExprRefField(base=E.TypeExprRefSelf(), index=masks[p])
-            body = [
-                ConstraintExpr(expr=E.ExprBin(lhs=ref, op=E.BinOp.Lt,
-                                              rhs=E.ExprConstant(value=p.size))),
-                ConstraintExpr(expr=E.ExprBin(
-                    lhs=E.ExprBin(lhs=E.ExprBin(lhs=mask, op=E.BinOp.RShift, rhs=ref),
+                # The busy mask, one variable per BUSY_WORD_BITS instances.
+                masks[p] = []
+                for w in range(-(-p.size // BUSY_WORD_BITS)):
+                    slot = self._new_aux(node.id)
+                    masks[p].append(slot)
+                    self._aux_vars.setdefault(node.id, []).append(ScScopeVar(
+                        name="%s%s$busy@%d%s" % ((node.path + ".") if node.path else "",
+                                                 ref_name, pid, ("." + str(w)) if w else ""),
+                        node=node.id, slot=slot, width=min(BUSY_WORD_BITS, p.size - BUSY_WORD_BITS * w), rand=True,
+                        busy_pool=pid, busy_lock=lock, busy_word=w))
+            body = [ConstraintExpr(expr=E.ExprBin(lhs=ref, op=E.BinOp.Lt,
+                                                  rhs=E.ExprConstant(value=p.size)))]
+            for w, slot in enumerate(masks[p]):
+                mask = E.ExprRefField(base=E.TypeExprRefSelf(), index=slot)
+                bit = ref if not w else E.ExprBin(lhs=ref, op=E.BinOp.Sub,
+                                                  rhs=E.ExprConstant(value=BUSY_WORD_BITS * w))
+                free = ConstraintExpr(expr=E.ExprBin(
+                    lhs=E.ExprBin(lhs=E.ExprBin(lhs=mask, op=E.BinOp.RShift, rhs=bit),
                                   op=E.BinOp.BitAnd, rhs=E.ExprConstant(value=1)),
-                    op=E.BinOp.Eq, rhs=E.ExprConstant(value=0)))]
+                    op=E.BinOp.Eq, rhs=E.ExprConstant(value=0)))
+                if len(masks[p]) == 1:
+                    body.append(free)
+                else:
+                    lo = E.ExprBin(lhs=ref, op=E.BinOp.GtE, rhs=E.ExprConstant(value=BUSY_WORD_BITS * w))
+                    hi = E.ExprBin(lhs=ref, op=E.BinOp.Lt, rhs=E.ExprConstant(value=BUSY_WORD_BITS * (w + 1)))
+                    body.append(ConstraintImplies(
+                        antecedent=E.ExprBin(lhs=lo, op=E.BinOp.And, rhs=hi), body=[free]))
+            body.extend(self._claim_attrs(p, pid, ref, attrs))
             cs = body if len(pools) == 1 else [ConstraintImplies(
                 antecedent=E.ExprBin(lhs=comp, op=E.BinOp.Eq, rhs=E.ExprConstant(value=k)),
                 body=body)]
             self._flow_cons.append((cs, ScopeConstraintKind.TYPE, node.id, None))
+        for other in node.claims:
+            # one action never claims one instance twice
+            ne = [ConstraintExpr(expr=E.ExprBin(
+                lhs=ref, op=E.BinOp.NotEq,
+                rhs=E.ExprRefField(base=E.TypeExprRefSelf(), index=other.iid_slot)))]
+            same = [k for k, pid in claim.pools if (k, pid) in other.pools]
+            if len(same) == len(claim.pools) == len(other.pools):
+                cs = ne
+            else:
+                cs = [ConstraintImplies(antecedent=E.ExprBin(
+                    lhs=comp, op=E.BinOp.Eq, rhs=E.ExprConstant(value=k)), body=ne)
+                    for k in same]
+            if cs:
+                self._flow_cons.append((cs, ScopeConstraintKind.TYPE, node.id, None))
         node.claims.append(claim)
         self._needs_cone.add(node.id)
+
+    def _claim_attrs(self, p, pid, ref, attrs) -> list:
+        """A resource instance's rand attributes are one value per instance,
+        whichever actions claim it (16.4.4): variables of the root, one per
+        instance and attribute, solved with every claim that may take it.
+        A claim's attribute equals that of the instance it holds."""
+        if not attrs:
+            return []
+        table = self._res_attrs.setdefault(pid, {})
+        where = "%s@%s" % (p.name, self.table.insts[p.inst][1] or "<root>")
+        types = self.layouts.types
+        out = []
+        for s, leaf in attrs:
+            name = ".".join(leaf.path[1:])
+            slots = table.get(name)
+            if slots is None:
+                dom = leaf_domain(leaf, types)
+                slots = table[name] = []
+                for k in range(p.size):
+                    slot = self._new_aux(0)
+                    slots.append(slot)
+                    self._aux_vars.setdefault(0, []).append(ScScopeVar(
+                        name="%s[%d].%s" % (where, k, name), node=0, slot=slot,
+                        width=dom.width, signed=dom.signed, rand=True,
+                        attr_pool=pid, attr_inst=k))
+                    held = domain_expr(slot, dom)
+                    if held is not None:
+                        self._flow_cons.append(([ConstraintExpr(expr=held)],
+                                                ScopeConstraintKind.TYPE, 0, None))
+                self._needs_cone.add(0)
+            mine = E.ExprRefField(base=E.TypeExprRefSelf(), index=s)
+            for k, slot in enumerate(slots):
+                out.append(ConstraintImplies(
+                    antecedent=E.ExprBin(lhs=ref, op=E.BinOp.Eq,
+                                         rhs=E.ExprConstant(value=k)),
+                    body=[ConstraintExpr(expr=E.ExprBin(
+                        lhs=mine, op=E.BinOp.Eq,
+                        rhs=E.ExprRefField(base=E.TypeExprRefSelf(), index=slot)))]))
+        return out
 
     # -- constraints and cones ----------------------------------------------
 
@@ -1110,19 +2039,15 @@ class TreeBuilder:
                                              owner=owner, scope=scope, site=site))
 
         defaults: List[D.DefaultStmt] = []
+        softs = []
         seq = 0
         for node in tree.nodes:
             lay = self._lay[node.id]
             sbase = self._scope_base[node.id]
             resolve = self._resolver(node.id, dict(lay.fields))
             depth = self._depth(node.id)
-            for prefix, fn in constraint_sites(type_constraints(lay.dt), lay.dt,
+            for prefix, fn in constraint_sites(type_constraints(lay.dt, self.layouts.types), lay.dt,
                                                self.layouts.types):
-                for kind, where in (getattr(fn, "metadata", None) or {}).get(
-                        "untranslated", ()):
-                    raise UnsupportedConstructError(
-                        "%s'%s' constraint in %r is not supported yet"
-                        % (where, kind, getattr(fn, "name", "?")), loc=_loc(fn))
                 for st in getattr(fn, "body", []) or []:
                     if D.is_default(st):
                         # Higher in the tree, then shallower in the node's
@@ -1135,8 +2060,19 @@ class TreeBuilder:
                              self._leaves_under(node.id, path, dict(lay.fields))],
                             lambda v, r=resolve, p=prefix: resolve_refs(v, r, p)))
                         continue
-                    add(stmt_to_constraints(st, resolve, fn, prefix),
-                        ScopeConstraintKind.TYPE, node.id)
+                    if (mentions_prev(st) and prefix
+                            and (node.id, prefix[0]) not in self._prev):
+                        # A state input's `prev` held when it was written.
+                        continue
+                    seq += 1
+                    cs = stmt_to_constraints(st, resolve, fn, prefix, soft=True)
+                    # A soft ranks as a default does: higher in the tree,
+                    # then shallower, then later wins. At one node, the
+                    # type's softs rank below its activity constraints',
+                    # and those below its `with` blocks' (TYPE < ACTIVITY < WITH).
+                    softs.extend(((-depth, 0, -len(prefix), seq), c) for c in cs
+                                 if isinstance(c, ConstraintSoft))
+                    add(cs, ScopeConstraintKind.TYPE, node.id)
             # A rand leaf holds only its type's values (an enum's members),
             # wherever it is solved.
             for i, leaf in enumerate(lay.own):
@@ -1147,8 +2083,11 @@ class TreeBuilder:
             for ac in lay.constraints:
                 r = self._resolver(node.id, ac.names)
                 for e in ac.stmt.constraints:
-                    add(expr_to_constraints(subst_names(e, ac.consts), r),
-                        ScopeConstraintKind.ACTIVITY, node.id, scope=sbase + ac.scope)
+                    seq += 1
+                    cs = expr_to_constraints(subst_names(e, ac.consts), r, soft=True)
+                    softs.extend(((-depth, 1, 0, seq), c) for c in cs
+                                 if isinstance(c, ConstraintSoft))
+                    add(cs, ScopeConstraintKind.ACTIVITY, node.id, scope=sbase + ac.scope)
         # A default, or a disable, that another node wrote changes what this
         # node's own problem would solve: the node is solved in a cone.
         for d in defaults:
@@ -1162,6 +2101,8 @@ class TreeBuilder:
                 add([ConstraintExpr(expr=self._comp_choice(node.id))],
                     ScopeConstraintKind.COMP, node.id)
         for site in tree.sites:
+            if site.id not in self._site_src:
+                continue                     # an inferred node's (M9a3)
             ce = self._comp_with(site)
             if ce is not None:
                 add([ConstraintExpr(expr=ce)], ScopeConstraintKind.WITH,
@@ -1171,13 +2112,33 @@ class TreeBuilder:
                 continue
             r = self._resolver(site.owner, stmt.names, target=site.target,
                                indices=tuple(v for v in stmt.indices if v))
+            depth = self._depth(site.owner)
             for e in stmt.stmt.inline_constraints:
-                add(expr_to_constraints(subst_names(e, stmt.consts), r),
-                    ScopeConstraintKind.WITH, site.owner, site=site.id)
+                seq += 1
+                cs = expr_to_constraints(subst_names(e, stmt.consts), r, soft=True)
+                for c in cs:
+                    if c.loc is None:
+                        c.loc = e.loc
+                # Written in the owner's activity: above the traversed
+                # action's type (one level down) and the owner's own.
+                softs.extend(((-depth, 2, 0, seq), c) for c in cs
+                             if isinstance(c, ConstraintSoft))
+                add(cs, ScopeConstraintKind.WITH, site.owner, site=site.id)
+        for rank, (_, c) in enumerate(sorted(softs, key=lambda kc: kc[0])):
+            c.rank = rank
         for nid, tie in self._comp_ties:
             add([tie], ScopeConstraintKind.COMP, nid)
         for cs, kind, owner, scope in self._flow_cons:
             add(cs, kind, owner, scope=scope)
+        # A permanent field held only by `== 0` (the library's default) never
+        # outlives its action: its claims in sequence need no solve together.
+        held_false = {}
+        for c in out:
+            for s in self._slots(c.constraint):
+                held_false[s] = held_false.get(s, True) and _is_eq_zero(c.constraint, s)
+        for ps, cs, owner in self._perm_cons:
+            if not held_false.get(ps, False):
+                add(cs, ScopeConstraintKind.TYPE, owner)
         return out
 
     def _cones(self) -> None:
@@ -1216,12 +2177,16 @@ class TreeBuilder:
                 slot = node.base + i
                 if not leaf.rand and slot not in read and slot not in self._live_from:
                     continue
-                dom = leaf_domain(leaf, self.layouts.types)
+                # A list is an array: read, or solved when rand (F6.10e).
+                dom = list_elem_domain(leaf, self.layouts.types)
+                array = dom is not None
+                if not array:
+                    dom = leaf_domain(leaf, self.layouts.types)
                 out.append(ScScopeVar(
                     name=(node.path + "." if node.path else "") + leaf.name,
                     node=nid, slot=slot, width=dom.width, signed=dom.signed,
                     rand=leaf.rand, live_from=self._live_from.get(slot),
-                    pick=self._pick_of.get(slot)))
+                    pick=self._pick_of.get(slot), array=array))
             if node.comp_slot is not None:
                 out.append(ScScopeVar(
                     name=(node.path + "." if node.path else "") + "comp",
@@ -1234,13 +2199,14 @@ class TreeBuilder:
 
 
 def build_tree(layouts: Layouts, root: str, qname: str, comps=None,
-               root_comp: Optional[str] = None) -> ScActionTree:
+               root_comp: Optional[str] = None, claims=None) -> ScActionTree:
     """The :class:`ScActionTree` of action *qname*, exported as *root*.
 
     *comps* (``comp_tree.CompLayouts``) and *root_comp*, the root component
     type, place each node in its component instances; without them every
-    node runs in the root's."""
-    return TreeBuilder(layouts, comps, root_comp).build(root, qname)
+    node runs in the root's. *claims* assigns executor claims
+    (:attr:`TreeBuilder.claims`)."""
+    return TreeBuilder(layouts, comps, root_comp, claims).build(root, qname)
 
 
 __all__ = ["Layouts", "TypeLayout", "TreeBuilder", "build_tree"]

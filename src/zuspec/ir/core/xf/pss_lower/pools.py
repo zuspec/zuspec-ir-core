@@ -25,6 +25,7 @@ from __future__ import annotations
 import dataclasses as dc
 from typing import Any, Dict, List, Optional, Tuple
 
+from ...data_type import DataTypeArray
 from ..validate import UnsupportedConstructError
 from .layout import resolve
 
@@ -90,6 +91,25 @@ class PoolTable:
         full = ".".join(([path] if path else []) + rel)
         return self._by_path.get(full)
 
+    def _under_all(self, base: int, rel: List[str]) -> List[int]:
+        """The instances *rel* names from instance *base*. A component
+        array named without brackets is every element of it (12.3 b)."""
+        path = self.insts[base][1]
+        prefixes = [path] if path else [""]
+        for part in rel:
+            nxt = []
+            for pre in prefixes:
+                full = "%s.%s" % (pre, part) if pre else part
+                if full in self._by_path:
+                    nxt.append(full)
+                else:
+                    i = 0
+                    while "%s[%d]" % (full, i) in self._by_path:
+                        nxt.append("%s[%d]" % (full, i))
+                        i += 1
+            prefixes = nxt
+        return [self._by_path[p] for p in prefixes]
+
     def _in_subtree(self, inst: int, top: int) -> bool:
         return top <= inst < top + self.insts[top][2]
 
@@ -119,13 +139,21 @@ class PoolTable:
         except UnsupportedConstructError:
             return x
 
+    def pool_type(self, p: PoolInst) -> Any:
+        """The flow-object or resource type pool *p* holds."""
+        return self._pool_type(p)
+
     def _pool_type(self, p: PoolInst) -> Any:
         if p.decl.element_type is not None:
             return self._type_of(p.decl.element_type)
         return self.types.get(p.decl.element_type_name)
 
     def _same_type(self, p: PoolInst, ref_type: Any) -> bool:
-        return self._pool_type(p) is self._type_of(ref_type)
+        t = self._type_of(ref_type)
+        if isinstance(t, DataTypeArray):
+            # a claim array (``lock R r[2]``) binds like one claim of R
+            t = self._type_of(t.element_type)
+        return self._pool_type(p) is t
 
     # -- the table ------------------------------------------------------------
 
@@ -157,12 +185,12 @@ class PoolTable:
                 for fp in b.field_paths:
                     parts = fp.split(".")
                     if parts[-1] == "*":
-                        sub = self._under(top, parts[:-1])
-                        if sub is not None and self._in_subtree(inst, sub):
+                        if any(self._in_subtree(inst, sub)
+                               for sub in self._under_all(top, parts[:-1])):
                             hits.append(False)
                     elif (len(parts) >= 2 and parts[-1] == field.name
                           and parts[-2] == simple
-                          and self._under(top, parts[:-2]) == inst):
+                          and inst in self._under_all(top, parts[:-2])):
                         hits.append(True)
                 for is_explicit in hits:
                     if is_explicit:

@@ -11,10 +11,15 @@ A flow-object reference or a resource claim is laid out the same way: one slot
 per scalar of the object it references (``inp.tag``, ``chan.instance_id``),
 in the action that declares it (``ref_leaves``).
 
+A fixed-size array of plain data (scalars or plain-data structs, LRM 7.9.2) is
+laid out like a struct whose fields are its indices: ``a[2]`` is the leaf with
+path ``("a", "2")``, ``ss[1].f`` the leaf ``("ss", "1", "f")``. One larger than
+:data:`MAX_ARRAY_LEAVES` slots stays one opaque slot.
+
 A leaf is named by its dotted path from the object (``s.csr.eol``). Anything
-else that is not a plain-data struct -- a scalar, an array, an action handle --
-is one opaque slot, exactly as before; what an opaque slot may be used for is
-each consumer's business.
+else that is not a plain-data struct or array -- a scalar, an action handle,
+an array too large to flatten -- is one opaque slot, exactly as before; what an
+opaque slot may be used for is each consumer's business.
 """
 from __future__ import annotations
 
@@ -22,8 +27,8 @@ import dataclasses as dc
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from ... import expr as E
-from ...data_type import (DataType, DataTypeClass, DataTypeEnum, DataTypeRef,
-                          DataTypeStruct)
+from ...data_type import (DataType, DataTypeArray, DataTypeClass, DataTypeEnum,
+                          DataTypeRef, DataTypeStruct)
 from ..validate import UnsupportedConstructError
 
 
@@ -79,6 +84,36 @@ def is_struct(dt: Any, types: Types = None) -> bool:
             and getattr(dt, "flow_kind", None) is None)
 
 
+#: The most slots a flattened data array may take (F6.1a).
+MAX_ARRAY_LEAVES = 1024
+
+
+def is_array(dt: Any, types: Types = None) -> bool:
+    """Is *dt* a fixed-size array of plain data, flattened one slot per
+    element leaf? An array of action handles, flow objects or components
+    is not (those are laid out by their own passes), nor one of unknown size."""
+    if isinstance(dt, DataTypeRef):
+        try:
+            dt = resolve(dt, types)
+        except UnsupportedConstructError:
+            return False
+    if not isinstance(dt, DataTypeArray) or dt.size is None or dt.size <= 0:
+        return False
+    elem = dt.element_type
+    if isinstance(elem, DataTypeRef):
+        try:
+            elem = resolve(elem, types)
+        except UnsupportedConstructError:
+            return False
+    if not (is_array(elem, types) or is_struct(elem, types)
+            or not isinstance(elem, (DataTypeStruct, DataTypeArray))):
+        return False
+    try:
+        return dt.size * slot_count(elem, types) <= MAX_ARRAY_LEAVES
+    except UnsupportedConstructError:
+        return False
+
+
 def struct_chain(dt: Any, types: Types) -> List[Any]:
     """*dt* and its bases, base first."""
     chain = []
@@ -105,15 +140,82 @@ def struct_fields(dt: Any, types: Types) -> List[Any]:
 def action_fields(dt: Any, types: Types) -> List[Any]:
     """The fields of action (or other class) *dt*, its bases' first: an
     attribute is inherited (LRM 10.2). A base the layout does not know
-    (``types`` incomplete) ends the chain."""
+    (``types`` incomplete) ends the chain. A base attribute a derived type
+    re-declares keeps its own slot, under its hidden name (``shadowed``)."""
     out: List[Any] = []
     try:
         chain = struct_chain(dt, types)
     except UnsupportedConstructError:
         chain = [dt]
-    for t in chain:
-        out.extend(getattr(t, "fields", []) or [])
+    for t, hidden in zip(chain, shadowed(chain)):
+        out.extend(dc.replace(f, name=hidden[f.name]) if f.name in hidden else f
+                   for f in getattr(t, "fields", []) or [])
     return out
+
+
+#: A base attribute shadowed by a derived type's attribute of the same name
+#: is ``<SUPER_PREFIX><base>_<name>`` in the derived object (as pssc names a
+#: component's hidden base members).
+SUPER_PREFIX = "_pss_super_"
+
+
+def shadowed(chain: List[Any]) -> List[Dict[str, str]]:
+    """For each type of *chain* (base first): its attributes a later type
+    re-declares, each mapped to its hidden name."""
+    out = []
+    for i, t in enumerate(chain):
+        later = {f.name for u in chain[i + 1:]
+                 for f in getattr(u, "fields", []) or []}
+        base = (getattr(t, "name", "") or "").rpartition("::")[2]
+        out.append({f.name: "%s%s_%s" % (SUPER_PREFIX, base, f.name)
+                    for f in getattr(t, "fields", []) or [] if f.name in later})
+    return out
+
+
+def chain_renames(chain: List[Any]) -> List[Tuple[Dict[str, str], Dict[str, str]]]:
+    """For each type of *chain*: ``(self, super)`` attribute renames for code
+    it declares, run on an object of the chain's last type. ``self.v`` in a
+    base whose ``v`` is shadowed is the hidden slot; ``super.v`` is the
+    nearest base's ``v``, under whatever name it has in the object."""
+    hidden = shadowed(chain)
+    out = []
+    sup: Dict[str, str] = {}
+    for i, t in enumerate(chain):
+        out.append((hidden[i], dict(sup)))
+        for f in getattr(t, "fields", []) or []:
+            sup[f.name] = hidden[i].get(f.name, f.name)
+    return out
+
+
+def rename_members(x: Any, self_names: Dict[str, str],
+                   super_names: Dict[str, str]) -> Any:
+    """*x* (an expression, statement, function, or list of them) with
+    ``self.<n>`` for each *self_names* key, and ``super.<n>`` for each
+    *super_names* key, both made ``self.<new name>``."""
+    if not self_names and not super_names:
+        return x
+    if isinstance(x, E.ExprAttribute):
+        if isinstance(x.value, E.TypeExprRefSelf) and x.attr in self_names:
+            return dc.replace(x, attr=self_names[x.attr])
+        if isinstance(x.value, E.TypeExprRefSuper) and x.attr in super_names:
+            return dc.replace(x, value=E.TypeExprRefSelf(loc=x.value.loc),
+                              attr=super_names[x.attr])
+    if isinstance(x, (list, tuple)):
+        new = [rename_members(y, self_names, super_names) for y in x]
+        if all(a is b for a, b in zip(new, x)):
+            return x
+        return type(x)(new) if isinstance(x, tuple) else new
+    if dc.is_dataclass(x) and not isinstance(x, (type, DataType)):
+        repl = {}
+        for f in dc.fields(x):
+            if not f.init:
+                continue
+            val = getattr(x, f.name)
+            new = rename_members(val, self_names, super_names)
+            if new is not val:
+                repl[f.name] = new
+        return dc.replace(x, **repl) if repl else x
+    return x
 
 
 def struct_functions(dt: Any, types: Types) -> List[Any]:
@@ -128,6 +230,13 @@ def value_leaves(dt: Any, types: Types, path: Tuple[str, ...] = (),
                  field: Any = None, rand: bool = False,
                  _open: Tuple[int, ...] = ()) -> List[Leaf]:
     """The leaves of a value of type *dt* rooted at *path*."""
+    if is_array(dt, types):
+        dt = resolve(dt, types)
+        elems: List[Leaf] = []
+        for i in range(dt.size):
+            elems.extend(value_leaves(dt.element_type, types, path + (str(i),),
+                                      field, rand, _open))
+        return elems
     if not is_struct(dt, types):
         return [Leaf(path, dt, field, rand)]
     dt = resolve(dt, types)
@@ -163,9 +272,18 @@ def ref_leaves(f: Any, types: Types) -> List[Leaf]:
 
 def object_leaves(dt: Any, types: Types, path: Tuple[str, ...] = ()) -> List[Leaf]:
     """The leaves of a flow object or resource of type *dt*, rooted at
-    *path* (see :func:`ref_leaves`)."""
+    *path* (see :func:`ref_leaves`); an array of them (``lock R r[2]``,
+    15.2) has each element's leaves under its index (``r.0.instance_id``)."""
     dt = resolve(dt, types)
     out: List[Leaf] = []
+    if isinstance(dt, DataTypeArray):
+        if not dt.size or dt.size <= 0:
+            raise UnsupportedConstructError(
+                "a flow-object or resource array needs a fixed size",
+                loc=getattr(dt, "loc", None))
+        for i in range(dt.size):
+            out.extend(object_leaves(dt.element_type, types, path + (str(i),)))
+        return out
     for sub in struct_fields(dt, types):
         kind = getattr(getattr(dt, "flow_kind", None), "name", None)
         rand = (getattr(sub, "rand_kind", None) is not None
