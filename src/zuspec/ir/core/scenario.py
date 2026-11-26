@@ -365,12 +365,17 @@ class ScImport(ScStmt):
         args:      Layer-0 argument expressions.
         ret_var:   Local/field receiving the return value (solve imports), else
                    ``None``.
+        kind:      The exec kind whose body this call was split out of
+                   (``"body"``), else ``None``. Its arguments are read in that
+                   exec's scope: a local the body declared before the call is
+                   still in scope at it (20.1).
     """
     fn: str = dc.field()
     fn_id: int = dc.field()
     blocking: bool = dc.field(default=True)
     args: List['Expr'] = dc.field(default_factory=list)
     ret_var: Optional[str] = dc.field(default=None)
+    kind: Optional[str] = dc.field(default=None)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScImport(self)

@@ -41,6 +41,9 @@ from ...stmt import StmtAssign
 from ..validate import UnsupportedConstructError
 from .layout import Leaf, field_leaves, is_struct, prefix_self, resolve
 
+#: The core-library types every register is (21.14.1), by IR name.
+REGISTER_BASES = frozenset(("addr_reg_pkg::reg_base_c", "addr_reg_pkg::reg_sized_c"))
+
 #: A component instance's ``uid`` is this plus its instance id.
 COMP_UID_BASE = 0x40000000
 
@@ -178,12 +181,26 @@ class CompLayouts:
             dt = resolve(sup, self.types) if sup is not None else None
         return list(reversed(out))
 
-    def is_a(self, qname: str, base: str) -> bool:
-        """Is component type *qname* *base* or derived from it?"""
+    def is_a(self, qname: str, base: str, templates: bool = True) -> bool:
+        """Is component type *qname* *base* or derived from it?
+
+        A specialization (``w_c<base_c>``, translated as ``w_c_base_c``) is
+        its template too; with *templates* False it is not -- it carries its
+        own copy of each of the template's members.
+
+        A register (``reg_c<R, ACC, SZ>``, a ``DataTypeRegister``) carries
+        no super type, but it is a ``reg_sized_c<SZ>`` and so a
+        ``reg_base_c`` (21.14.1): a reference of either type may refer to
+        it. ``reg_sized_c``'s width is the caller's to check
+        (``DataTypeEntityRef.size_bits``)."""
         b = self.types.get(base)
-        return b is not None and any(
-            t is b or getattr(t, "template", None) == base
-            for t in self.chain(qname))
+        if b is None:
+            return False
+        if any(t is b or (templates and getattr(t, "template", None) == base)
+               for t in self.chain(qname)):
+            return True
+        return (isinstance(self.types.get(qname), DataTypeRegister)
+                and getattr(b, "name", None) in REGISTER_BASES)
 
     def function(self, qname: str, name: str, functions: Dict[str, Any]):
         """Function *name* of component type *qname*: its own, else the

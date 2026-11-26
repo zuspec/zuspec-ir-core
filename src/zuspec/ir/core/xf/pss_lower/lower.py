@@ -6,7 +6,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from ...data_type import (DataTypeClass, DataTypeComponent, DataTypeFloat, DataTypeString,
-                          DataTypeList, DataTypeMap, DataTypeSet)
+                          DataTypeList, DataTypeMap, DataTypeSet, DataTypeEntityRef)
 from ...expr_phase2 import ExprList
 from ...activity import (
     ActivitySequenceBlock, ActivityAnonTraversal, ActivityTraversal,
@@ -23,7 +23,7 @@ from ...scenario import (
 )
 from ...stmt import Stmt, StmtExpr, StmtAssign, StmtSuper
 from ...expr import (Expr, ExprCall, ExprAttribute, ExprConstant, TypeExprRefSelf, TypeExprRefTraversed,
-                     ExprRefUnresolved)
+                     ExprRefUnresolved, ExprNull)
 from ..validate import ScenarioValidator, UnsupportedConstructError
 from .constraints import (LIFECYCLE_FUNCS, collect_solve_problem,
                           is_pending_constraint, type_constraints)
@@ -120,6 +120,10 @@ def _init_block(dt: Any, types: Dict[str, Any]) -> Optional[ScExecBlock]:
             # A list, map or set attribute starts empty at each traversal,
             # also of an object a loop traverses again.
             stmts.append(StmtAssign(targets=[_self_path(leaf.path)], value=ExprList()))
+        elif isinstance(leaf.datatype, DataTypeEntityRef):
+            # A `ref C` attribute starts null (LRM 7.10): the object starts
+            # zeroed, and 0 is an instance, the root.
+            stmts.append(StmtAssign(targets=[_self_path(leaf.path)], value=ExprNull()))
     return ScExecBlock(kind="init", stmts=stmts) if stmts else None
 
 
@@ -311,7 +315,10 @@ class PSSToScenarioPass:
                 return True
             if not isinstance(type_map.get(owner), DataTypeComponent):
                 return False
-            return any(self._comps.is_a(t, owner) for t in placed)
+            # A specialization runs its own copies of its template's actions
+            # (`w_c_base_c::A`), never the template's (`w_c::A`), whose base
+            # may be its own type parameter.
+            return any(self._comps.is_a(t, owner, templates=False) for t in placed)
         owned = [(q, dt) for (q, dt) in actions
                  if q.rsplit("::", 1)[0] == root]
         # A component with no actions can still be entered at its functions
@@ -620,7 +627,7 @@ class PSSToScenarioPass:
         out: List = []
         cur: List = []
         for s in stmts:
-            imp = self._as_blocking_import(s)
+            imp = self._as_blocking_import(s, kind)
             if imp is not None:
                 if cur:
                     out.append(ScExecBlock(kind=kind, stmts=cur))
@@ -632,9 +639,9 @@ class PSSToScenarioPass:
             out.append(ScExecBlock(kind=kind, stmts=cur))
         return out
 
-    def _as_blocking_import(self, stmt):
+    def _as_blocking_import(self, stmt, kind: str):
         """Return a ScImport if *stmt* is a statement-level call to a blocking
-        (target) import, else None."""
+        (target) import of the exec *kind*'s body, else None."""
         imports = getattr(self, "_imports", {})
         if not isinstance(stmt, StmtExpr):
             return None
@@ -652,7 +659,7 @@ class PSSToScenarioPass:
         if info is None or not info["blocking"]:
             return None
         return ScImport(fn=name, fn_id=info["fn_id"], blocking=True,
-                        args=list(e.args)).copy_loc(stmt)
+                        args=list(e.args), kind=kind).copy_loc(stmt)
 
     # ------------------------------------------------------------------
     # ScheduleNormalize — compound activities → structured scenario ops

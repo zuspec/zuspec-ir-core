@@ -359,9 +359,14 @@ class DataTypeEntityRef(DataType):
     component (``kind`` "component"), the type named by ``target`` (a
     ``DataTypeComponent``, or a ``DataTypeRef`` naming one declared later).
     It may be null, its default. Not ``DataTypeRef``, which is a by-name
-    placeholder for a type, not a value that refers to an entity."""
+    placeholder for a type, not a value that refers to an entity.
+
+    ``size_bits`` is the ``SZ`` of a ``ref reg_sized_c<SZ>`` (21.14.1): it
+    refers to any register of that width. ``target`` names the template, so
+    the width is carried here; None for any other reference."""
     target: DataType = dc.field()
     kind: str = dc.field(default="component")
+    size_bits: Optional[int] = dc.field(default=None)
 
 @dc.dataclass(kw_only=True)
 class DataTypeList(DataType):
