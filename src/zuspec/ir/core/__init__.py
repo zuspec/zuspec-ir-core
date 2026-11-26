@@ -59,7 +59,7 @@ from .anchor import (AnchorEntry, AnchorTable, assign_anchors, mark_synthesized,
 from .fields import Bind, BindSet, Field, FieldInOut, FieldKind, SignalDirection, RandKind, FieldMetaKind, ClaimMode, Pool, PoolBind
 from .data_type import (
     DataType, DataTypeInt, DataTypeUptr, DataTypeStruct, DataTypeClass, DataTypeAction, DataTypeComponent, DataTypeExtern, DataTypeBundle, ExternPin, BundleRole,
-    DataTypeExpr, DataTypeEnum, DataTypeString, DataTypeChandle,
+    DataTypeExpr, DataTypeEnum, DataTypeString, DataTypeChandle, DataTypeFloat, DataTypeEntityRef,
     DataTypeList, DataTypeArray, DataTypeMap, DataTypeSet,
     DataTypeLock, DataTypeEvent, DataTypeMemory,
     DataTypeAddressSpace, DataTypeAddrHandle, DataTypeProtocol, DataTypeRef, DataTypeMemberRef, TypeDef,
@@ -116,7 +116,7 @@ from .expr_phase2 import (
 from .stmt import (
     Stmt, StmtExpr, StmtAssign, StmtAnnAssign, StmtAugAssign, StmtReturn, StmtIf, StmtIfClause, StmtIfChain, StmtFor,
     StmtWhile, StmtBreak, StmtContinue, StmtPass, StmtFork, StmtRaise, StmtAssert, Alias, Arg, Arguments,
-    StmtAssume, StmtCover, StmtUnique, StmtDefault, StmtDefaultDisable,
+    StmtAssume, StmtCover, StmtUnique, StmtDefault, StmtDefaultDisable, StmtSoft, StmtDist,
     WithItem, StmtWith, StmtExceptHandler, StmtTry, TypeIgnore, Module,
     StmtMatch, StmtMatchCase, Pattern, PatternValue, PatternAs, PatternOr, PatternSequence,
     # PSS-specific statements
@@ -162,7 +162,7 @@ from .scenario import (
     ScSeq, ScPar, ScSelectBranch, ScSelect, ScLoop, ScAtomic,
     ScIf, ScMatchCase, ScMatch,
     ScInvoke, ScSpawn, ScJoin, ScWait, ScImport, ScImportDecl,
-    ScSolveVar, SolveStrategy, SolveInject, ScSolveProblem,
+    ScSolveVar, ScSolveArray, SolveStrategy, SolveInject, ScSolveProblem,
     ScopeKind, COMMITTING_SCOPES, ScActivityScope, ScActionNode,
     ScPool, ScClaim, ScStateWrite, ScBufferPick,
     ScTraversalSite, ScopeConstraintKind, ScScopeVar, ScScopeConstraint,
@@ -204,7 +204,7 @@ __all__ = [
     "CfgListener",
     "ProcKind","ProcBlock","ExprInReset","XingPort","SyncXingUse","SyncXingRecord",
     "Package","PackageImport","PackageConst","PackageType",
-    "DataTypeExpr","DataTypeEnum","DataTypeString","DataTypeChandle",
+    "DataTypeExpr","DataTypeEnum","DataTypeString","DataTypeChandle","DataTypeFloat","DataTypeEntityRef",
     "DataTypeList","DataTypeArray","DataTypeMap","DataTypeSet",
     "DataTypeLock","DataTypeEvent","DataTypeMemory",
     "DataTypeAddressSpace","DataTypeAddrHandle","DataTypeProtocol","DataTypeRef","DataTypeMemberRef","TypeDef",
@@ -235,7 +235,7 @@ __all__ = [
     "ExprSext","ExprZext","ExprCbit","ExprSigned","ExprNew",
     "ExprConcat","ExprReplicate","ExprPartSelect",
     "Stmt","StmtExpr","StmtAssign","StmtAnnAssign","StmtAugAssign","StmtReturn","StmtIf","StmtIfClause","StmtIfChain","StmtFor","StmtWhile",
-    "StmtBreak","StmtContinue","StmtPass","StmtFork","StmtRaise","StmtAssert","StmtAssume","StmtCover","StmtUnique","StmtDefault","StmtDefaultDisable","Alias","Arg","Arguments",
+    "StmtBreak","StmtContinue","StmtPass","StmtFork","StmtRaise","StmtAssert","StmtAssume","StmtCover","StmtUnique","StmtDefault","StmtDefaultDisable","StmtSoft","StmtDist","Alias","Arg","Arguments",
     # PSS-specific statements
     "StmtRepeat","StmtRepeatWhile","StmtForeach","StmtYield","StmtSuper","StmtRandomize",
     # Interface-protocol statements
@@ -269,7 +269,7 @@ __all__ = [
     "ScSeq","ScPar","ScSelectBranch","ScSelect","ScLoop","ScAtomic",
     "ScIf","ScMatchCase","ScMatch",
     "ScInvoke","ScSpawn","ScJoin","ScWait","ScImport","ScImportDecl",
-    "ScSolveVar","SolveStrategy","SolveInject","ScSolveProblem",
+    "ScSolveVar","ScSolveArray","SolveStrategy","SolveInject","ScSolveProblem",
     "ScActionInst","ScComponentInst",
     "HarnessKind","SeedSource","ScRootAction","ScHarness","ScenarioModule",
     # Abstraction lowering interfaces

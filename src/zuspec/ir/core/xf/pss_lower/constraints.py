@@ -18,26 +18,28 @@ pass does two things a solver backend needs:
   is the field's index in the full field list — the form the solver lowering
   (``build_solve_blob``) addresses variables by.
 
-``foreach`` (needs array flattening) and ``solve...before`` are deferred and
-reported, not silently dropped. ``soft``/``dist`` have no IR form yet: the
-front end records them on their block (``metadata["untranslated"]``) and
-``collect_solve_problem`` refuses such a block. ``default`` and ``default
+``foreach`` over a fixed-size array is unrolled, one copy of its body per
+element; ``solve...before`` is deferred and reported, not silently dropped. A top-level ``soft``/``dist`` (``StmtSoft``/
+``StmtDist``) becomes ``ConstraintSoft``/``ConstraintDist``; one under a
+condition is refused, by the statement's line. ``default`` and ``default
 disable`` are resolved over the whole object first (``defaults.py``).
 """
 from __future__ import annotations
 
 import dataclasses as dc
+import re
 from typing import Dict, List, Optional
 
 from ... import constraint as C
 from ... import expr as E
 from ... import stmt as S
-from ...data_type import DataTypeClass
-from ...scenario import ScCoroutine, ScSolveProblem, ScSolveVar
+from ...data_type import DataTypeClass, DataTypeEnum, DataTypeInt, DataTypeList, DataTypeRef
+from ...scenario import ScCoroutine, ScSolveArray, ScSolveProblem, ScSolveVar
 from ..validate import UnsupportedConstructError
 from . import defaults as D
-from .layout import (domain_expr, is_ref, is_struct, leaf_domain, object_layout,
-                     resolve, struct_fields, struct_functions)
+from .layout import (action_fields, chain_renames, domain_expr, is_ref, is_struct, leaf_domain,
+                     object_layout, rename_members, resolve, struct_chain, struct_fields,
+                     struct_functions)
 
 
 def collect_solve_problem(coro: ScCoroutine, dt: DataTypeClass,
@@ -59,7 +61,7 @@ def collect_solve_problem(coro: ScCoroutine, dt: DataTypeClass,
     tree: it belongs to the tree's cone (``action_tree``), which solves it
     with lookahead, so it is left out here.
     """
-    leaves = object_layout(dt.fields, types)
+    leaves = object_layout(action_fields(dt, types), types)
     rand_leaves = [(i, leaf) for i, leaf in enumerate(leaves) if leaf.rand]
 
     # dotted leaf path -> object slot, for reference resolution.
@@ -68,15 +70,8 @@ def collect_solve_problem(coro: ScCoroutine, dt: DataTypeClass,
 
     constraints: List[C.Constraint] = []
     defaults: List[D.DefaultStmt] = []
+    softs = []
     for seq, (prefix, fn) in enumerate(constraint_sites(coro.pending_constraints, dt, types)):
-        # A statement the front end could not translate (`soft`, `dist`) is
-        # recorded on its block rather than dropped. Solving the block without
-        # it would be a weaker problem than the one written.
-        for kind, where in (getattr(fn, "metadata", None) or {}).get("untranslated", ()):
-            raise UnsupportedConstructError(
-                "%s'%s' constraint in %r is not supported yet"
-                % (where, kind, getattr(fn, "name", "?")),
-                loc=getattr(fn, "loc", None))
         for st in getattr(fn, "body", []) or []:
             if D.is_default(st):
                 # The action is the highest-level context here; a struct
@@ -88,12 +83,23 @@ def collect_solve_problem(coro: ScCoroutine, dt: DataTypeClass,
                     st, (-len(prefix), seq), None, leaves_under(leaves, path),
                     lambda v: resolve_refs(v, resolve, prefix)))
                 continue
+            if mentions_prev(st):
+                # A state's `prev` (13.3) is only known in the action tree,
+                # which pins it; the initial object satisfies it vacuously.
+                continue
             # One through a sub-action handle, or reading a component
             # attribute, belongs to the action tree's cone, and a node whose
             # type reads `comp.f` is always solved in one.
-            constraints.extend(c for c in stmt_to_constraints(st, resolve, fn, prefix)
-                               if not (handles and reads_handle(c, handles))
-                               and not reads_comp(c))
+            for c in stmt_to_constraints(st, resolve, fn, prefix, soft=True):
+                if (handles and reads_handle(c, handles)) or reads_comp(c):
+                    continue
+                if isinstance(c, C.ConstraintSoft):
+                    # Shallower in the object, then later, wins (as for
+                    # defaults); ranks are numbered once all are seen.
+                    softs.append(((-len(prefix), seq, len(softs)), c))
+                constraints.append(c)
+    for rank, (_, c) in enumerate(sorted(softs, key=lambda kc: kc[0])):
+        c.rank = rank
     constraints.extend(c for _, c in D.equalities(defaults))
 
     if not rand_leaves and not constraints:
@@ -101,6 +107,14 @@ def collect_solve_problem(coro: ScCoroutine, dt: DataTypeClass,
 
     vars_: List[ScSolveVar] = []
     writeback = {}
+    arrays: List[ScSolveArray] = []
+    for slot, leaf in rand_leaves:
+        # A rand list's elements are solved, as many as it holds (F6.10e).
+        dom = list_elem_domain(leaf, types)
+        if dom is not None:
+            arrays.append(ScSolveArray(name=leaf.name, array_id=len(arrays), slot=slot,
+                                       width=dom.width, signed=dom.signed, rand=True))
+    rand_leaves = [(s, lf) for s, lf in rand_leaves if s not in {a.slot for a in arrays}]
     for vid, (slot, leaf) in enumerate(rand_leaves):
         f = leaf.field
         if getattr(f, "domain", None) is not None:
@@ -118,11 +132,80 @@ def collect_solve_problem(coro: ScCoroutine, dt: DataTypeClass,
         if held is not None:
             constraints.append(C.ConstraintExpr(expr=held))
 
-    return ScSolveProblem(vars=vars_, constraints=constraints, writeback=writeback)
+    # A non-rand field a constraint reads (set in pre_solve, say) is an
+    # input: pinned to its value when the action is solved.
+    # A list it reads (`x in l`, `l.size()`) is an input array, as long as
+    # the list is when the action is solved.
+    rand_slots = {slot for slot, _ in rand_leaves} | {a.slot for a in arrays}
+    for slot in sorted(read_slots(constraints) - rand_slots):
+        if not 0 <= slot < len(leaves):
+            continue
+        leaf = leaves[slot]
+        dom = list_elem_domain(leaf, types)
+        if dom is not None:
+            arrays.append(ScSolveArray(name=leaf.name, array_id=len(arrays), slot=slot,
+                                       width=dom.width, signed=dom.signed))
+            continue
+        dom = leaf_domain(leaf, types)
+        vars_.append(ScSolveVar(name=leaf.name, var_id=len(vars_), slot=slot,
+                                width=dom.width, signed=dom.signed, input=True))
+
+    return ScSolveProblem(vars=vars_, constraints=constraints, writeback=writeback,
+                          input_arrays=arrays)
+
+
+def list_elem_domain(leaf, types):
+    """The solver domain of the elements of list *leaf*, or None when the
+    leaf is not a list. A list a constraint reads is an input array of the
+    solve (``x in l``, ``l.size()``), so its elements must be integers."""
+    dt = resolve(leaf.datatype, types) if isinstance(leaf.datatype, DataTypeRef) \
+        else leaf.datatype
+    if not isinstance(dt, DataTypeList):
+        return None
+    elem = dt.element_type
+    if isinstance(elem, DataTypeRef):
+        elem = resolve(elem, types)
+    if not isinstance(elem, (DataTypeInt, DataTypeEnum)):
+        raise UnsupportedConstructError(
+            "a constraint reads list %r, whose elements are not integers or "
+            "enums" % leaf.name, loc=getattr(leaf.field, "loc", None))
+    return leaf_domain(leaf._replace(datatype=elem), types)
+
+
+def read_slots(cons) -> set:
+    """The object slots the constraints *cons* read (``ExprRefField``)."""
+    found = set()
+
+    def walk(x):
+        if isinstance(x, E.ExprRefField) and isinstance(x.base, E.TypeExprRefSelf):
+            found.add(x.index)
+            return
+        if dc.is_dataclass(x) and not isinstance(x, type):
+            for f in dc.fields(x):
+                v = getattr(x, f.name)
+                for y in (v if isinstance(v, list) else [v]):
+                    walk(y)
+    for c in cons:
+        walk(c)
+    return found
+
+
+def mentions_prev(x) -> bool:
+    """Whether *x* reads a state object's ``prev`` (13.3): a constraint that
+    does is vacuously satisfied by the initial object."""
+    if isinstance(x, E.ExprAttribute) and x.attr == "prev" \
+            and isinstance(x.value, E.TypeExprRefSelf):
+        return True
+    if dc.is_dataclass(x) and not isinstance(x, type):
+        for f in dc.fields(x):
+            v = getattr(x, f.name)
+            if any(mentions_prev(y) for y in (v if isinstance(v, list) else [v])):
+                return True
+    return False
 
 
 #: Function names that are part of an action's lifecycle, not constraints.
-LIFECYCLE_FUNCS = ("body", "pre_solve", "post_solve")
+LIFECYCLE_FUNCS = ("body", "pre_body", "pre_solve", "post_solve")
 
 
 def is_pending_constraint(f) -> bool:
@@ -135,12 +218,28 @@ def is_pending_constraint(f) -> bool:
     """
     if getattr(f, "name", None) in LIFECYCLE_FUNCS:
         return False
-    return not (getattr(f, "metadata", None) or {}).get("_is_generic_constraint")
+    meta = getattr(f, "metadata", None) or {}
+    # A function declared in an action (a pssc extension) is called, not
+    # solved: ``ScenarioModule.functions`` has it.
+    return not (meta.get("_is_generic_constraint") or meta.get("action_function"))
 
 
-def type_constraints(dt) -> list:
-    """The constraint blocks of action *dt* (its own functions)."""
-    return [f for f in getattr(dt, "functions", []) or [] if is_pending_constraint(f)]
+def type_constraints(dt, types=None) -> list:
+    """The constraint blocks in force on action *dt*: its own and, given
+    *types*, its bases' -- a derived block replacing a base's of the same
+    name (LRM 16.1.3), a base's members renamed as the layout renames them."""
+    try:
+        chain = struct_chain(dt, types) if types is not None else [dt]
+    except UnsupportedConstructError:
+        chain = [dt]
+    out = []
+    for t, ren in zip(chain, chain_renames(chain)):
+        for f in getattr(t, "functions", []) or []:
+            if is_pending_constraint(f):
+                name = getattr(f, "name", None)
+                out[:] = [g for g in out if not name or getattr(g, "name", None) != name]
+                out.append(rename_members(f, *ren))
+    return out
 
 
 def constraint_sites(pending, dt, types):
@@ -155,7 +254,7 @@ def constraint_sites(pending, dt, types):
     """
     for fn in pending:
         yield (), fn
-    yield from _struct_sites(getattr(dt, "fields", []) or [], types, ())
+    yield from _struct_sites(action_fields(dt, types), types, ())
 
 
 def _struct_sites(fields, types, prefix):
@@ -222,11 +321,29 @@ def slot_resolver(slots: Dict[str, int]):
     return resolve
 
 
-def stmt_to_constraints(stmt, resolve, fn, prefix=()) -> List[C.Constraint]:
+def stmt_to_constraints(stmt, resolve, fn, prefix=(), soft=False) -> List[C.Constraint]:
+    """:func:`_stmt_to_constraints`, each result carrying *stmt*'s source
+    location (an unsat solve names its conflicting constraints by it)."""
+    out = _stmt_to_constraints(stmt, resolve, fn, prefix, soft)
+    loc = getattr(stmt, "loc", None)
+    if loc is not None:
+        for c in out:
+            if getattr(c, "loc", None) is None:
+                c.loc = loc
+    return out
+
+
+def _stmt_to_constraints(stmt, resolve, fn, prefix=(), soft=False) -> List[C.Constraint]:
     """Convert one constraint-body statement into resolved structured
     constraints. *prefix* is the path of the struct attribute the
     statement's ``self`` stands for (``()`` for the action itself);
-    *resolve* maps a reference (see :func:`resolve_refs`) to a slot."""
+    *resolve* maps a reference (see :func:`resolve_refs`) to a slot.
+
+    *soft* accepts a top-level ``soft`` statement (a ``ConstraintSoft`` of
+    rank 0; the caller ranks it) and a top-level ``dist`` (a
+    ``ConstraintDist``). Without it, or under a condition, both are refused:
+    the caller cannot rank a soft, and the solver takes a dist only at top
+    level."""
     def res(e):
         return resolve_refs(e, resolve, prefix)
 
@@ -248,6 +365,11 @@ def stmt_to_constraints(stmt, resolve, fn, prefix=()) -> List[C.Constraint]:
                                    then_body=then_body, else_body=else_body)]
 
     if isinstance(stmt, S.StmtUnique):
+        if stmt.items:
+            items = []
+            for x in stmt.items:
+                items.extend(_unique_elements(x, resolve, prefix) or [res(x)])
+            return [C.ConstraintUnique(items=items)]
         items = []
         for v in stmt.vars:
             slot = resolve("self", prefix + (v,))
@@ -258,11 +380,24 @@ def stmt_to_constraints(stmt, resolve, fn, prefix=()) -> List[C.Constraint]:
             items.append(E.ExprRefField(base=E.TypeExprRefSelf(), index=slot))
         return [C.ConstraintUnique(items=items)]
 
+    if soft and isinstance(stmt, S.StmtSoft):
+        return [C.ConstraintSoft(expr=res(stmt.expr))]
+
+    if soft and isinstance(stmt, S.StmtDist):
+        return [C.ConstraintDist(
+            target=res(stmt.target),
+            weights=[C.DistWeight(rng=res(w.rng),
+                                  weight=None if w.weight is None else res(w.weight),
+                                  per_value=w.per_value)
+                     for w in stmt.weights])]
+
+    if isinstance(stmt, (S.StmtSoft, S.StmtDist)):
+        # Not lowered to the solver yet; solving without it would be a weaker
+        # problem than the one written.
+        refuse_soft_dist(stmt, fn)
+
     if isinstance(stmt, S.StmtForeach):
-        raise UnsupportedConstructError(
-            "foreach constraints require array flattening (per-element solver vars "
-            "+ the ScSolveProblem.arrays map), which is not yet wired here",
-            loc=getattr(stmt, "loc", None))
+        return foreach_to_constraints(stmt, resolve, fn, prefix)
 
     raise UnsupportedConstructError(
         "constraint %r holds an unsupported statement %s"
@@ -270,8 +405,187 @@ def stmt_to_constraints(stmt, resolve, fn, prefix=()) -> List[C.Constraint]:
         loc=getattr(stmt, "loc", None))
 
 
-def expr_to_constraints(e, resolve, prefix=()) -> List[C.Constraint]:
-    """One boolean constraint expression, resolved."""
+def _unique_elements(e, resolve, prefix):
+    """The element slots of a fixed-size array of scalars that a ``unique``
+    operand names (``unique {arr}``: every element distinct, F6.2c), in index
+    order, or None if *e* is not such an array."""
+    rp = ref_path(e)
+    leaves = getattr(resolve, "leaves", None)
+    if rp is None or leaves is None:
+        return None
+    root, path = rp
+    if root == "self":
+        path = prefix + path
+    if resolve(root, path) is not None:
+        return None                              # a scalar
+    elems = leaves(root, index_path(path)) or []
+    if not elems or not all(n.isdigit() for n, _ in elems):
+        return None
+    return [E.ExprRefField(base=E.TypeExprRefSelf(), index=s)
+            for _, s in sorted(elems, key=lambda ns: int(ns[0]))]
+
+
+def foreach_to_constraints(stmt, resolve, fn, prefix=()) -> List[C.Constraint]:
+    """``foreach (v : a[i]) { body }`` over a fixed-size array, unrolled: the
+    body once per element, ``i`` the element's index and ``v`` the element
+    (``a[k]``), so each copy names scalar slots and the solver needs no
+    array support (F6.2a)."""
+    loc = getattr(stmt, "loc", None)
+    rp = ref_path(stmt.iter)
+    leaves = getattr(resolve, "leaves", None)
+    count = None
+    if rp is not None and leaves is not None:
+        root, path = rp
+        if root == "self":
+            path = prefix + path
+        idx = {n.split(".", 1)[0] for n, _ in (leaves(root, index_path(path)) or [])}
+        if idx and all(i.isdigit() for i in idx):
+            count = max(int(i) for i in idx) + 1
+    tgt = stmt.target.name if isinstance(stmt.target, E.ExprRefLocal) else None
+    ix = stmt.index_var.name if isinstance(stmt.index_var, E.ExprRefLocal) else None
+    if count is None and rp is not None:
+        # A list is one slot, as long as it is when solved: the foreach is
+        # kept for the solver, which loops over the list's elements (F6.10e).
+        root, path = rp
+        slot = resolve(root, prefix + path if root == "self" else path)
+        if slot is not None:
+            ix = ix or "__foreach_ix%d" % id(stmt)
+            binds = {}
+            if tgt is not None and tgt != ix:
+                binds[tgt] = E.ExprSubscript(value=stmt.iter, slice=E.ExprRefLocal(name=ix))
+            body = []
+            for s in bind_locals(stmt.body or [], binds):
+                body.extend(stmt_to_constraints(s, resolve, fn, prefix))
+            return [C.ConstraintForeach(array=E.ExprRefField(base=E.TypeExprRefSelf(), index=slot),
+                                        index_var=ix, body=body)]
+    if count is None:
+        raise UnsupportedConstructError(
+            "constraint foreach in %r iterates over something other than a "
+            "fixed-size array field or list" % getattr(fn, "name", "?"), loc=loc)
+    out: List[C.Constraint] = []
+    for k in range(count):
+        binds = {}
+        if tgt is not None and tgt != ix:
+            binds[tgt] = E.ExprSubscript(value=stmt.iter, slice=E.ExprConstant(value=k))
+        if ix is not None:
+            binds[ix] = E.ExprConstant(value=k)
+        for s in prune_ifs(bind_locals(stmt.body or [], binds)):
+            out.extend(stmt_to_constraints(s, resolve, fn, prefix))
+    return out
+
+
+_FOLD = {
+    E.BinOp.Add: lambda a, b: a + b, E.BinOp.Sub: lambda a, b: a - b,
+    E.BinOp.Mult: lambda a, b: a * b,
+    E.BinOp.Div: lambda a, b: int(a / b) if b else None,
+    E.BinOp.Mod: lambda a, b: a % b if b else None,
+    E.BinOp.Eq: lambda a, b: int(a == b), E.BinOp.NotEq: lambda a, b: int(a != b),
+    E.BinOp.Lt: lambda a, b: int(a < b), E.BinOp.LtE: lambda a, b: int(a <= b),
+    E.BinOp.Gt: lambda a, b: int(a > b), E.BinOp.GtE: lambda a, b: int(a >= b),
+    E.BinOp.And: lambda a, b: int(bool(a and b)), E.BinOp.Or: lambda a, b: int(bool(a or b)),
+}
+
+
+def const_int(e) -> Optional[int]:
+    """*e*'s value if it is built from integer constants alone (an unrolled
+    foreach index and arithmetic or comparisons on it), else None."""
+    if isinstance(e, E.ExprConstant):
+        return e.value if isinstance(e.value, int) and not isinstance(e.value, bool) else None
+    if isinstance(e, E.ExprBin) and e.op in _FOLD:
+        a, b = const_int(e.lhs), const_int(e.rhs)
+        return None if a is None or b is None else _FOLD[e.op](a, b)
+    if isinstance(e, E.ExprUnary) and e.op in (E.UnaryOp.USub, E.UnaryOp.Not):
+        a = const_int(e.operand)
+        return None if a is None else (-a if e.op is E.UnaryOp.USub else int(not a))
+    return None
+
+
+def prune_ifs(stmts) -> list:
+    """*stmts* with each ``if`` whose condition is a constant (once a
+    foreach index is fixed) replaced by the branch it takes: ``if (i > 0)
+    a[i] > a[i-1];`` must not name ``a[-1]`` in the first copy."""
+    out = []
+    for s in stmts:
+        if isinstance(s, S.StmtIf):
+            v = const_int(s.test)
+            if v is not None:
+                out.extend(prune_ifs((s.body if v else s.orelse) or []))
+                continue
+            s = dc.replace(s, body=prune_ifs(s.body or []), orelse=prune_ifs(s.orelse or []))
+        out.append(s)
+    return out
+
+
+def bind_locals(x, binds):
+    """*x* (an expression, statement or list of them) with each local
+    ``ExprRefLocal`` named in *binds* replaced by its expression."""
+    if isinstance(x, E.ExprRefLocal) and x.name in binds:
+        return binds[x.name]
+    if isinstance(x, list):
+        return [bind_locals(y, binds) for y in x]
+    if dc.is_dataclass(x) and not isinstance(x, (type, DataTypeClass)):
+        repl = {}
+        for f in dc.fields(x):
+            if not f.init:
+                continue
+            val = getattr(x, f.name)
+            if isinstance(val, (E.Expr, S.Stmt, list)):
+                new = bind_locals(val, binds)
+                if new is not val:
+                    repl[f.name] = new
+        x = dc.replace(x, **repl) if repl else x
+        if isinstance(x, E.ExprSubscript) and not isinstance(x.slice, E.ExprConstant):
+            v = const_int(x.slice)
+            if v is not None:
+                x = dc.replace(x, slice=E.ExprConstant(value=v))
+    return x
+
+
+def refuse_soft_dist(stmt, fn) -> None:
+    """Refuse a ``soft`` or ``dist`` statement, by its line."""
+    kind = "soft" if isinstance(stmt, S.StmtSoft) else "dist"
+    loc = getattr(stmt, "loc", None)
+    where = "line %d: " % loc.line if loc is not None and loc.line else ""
+    raise UnsupportedConstructError(
+        "%s'%s' constraint in %r is not supported yet"
+        % (where, kind, getattr(fn, "name", "?")),
+        loc=loc or getattr(fn, "loc", None))
+
+
+def expr_to_constraints(e, resolve, prefix=(), soft=False) -> List[C.Constraint]:
+    """One boolean constraint expression, resolved. *soft* accepts a
+    ``soft e`` (``ExprCall(soft, [e])`` from a ``with`` or an activity
+    constraint) as a ``ConstraintSoft`` of rank 0, for the caller to rank,
+    and a ``dist`` call as a ``ConstraintDist``; without it both are refused."""
+    # `soft e` in a `with` or an activity constraint: ExprCall(soft, [e]).
+    if _is_call(e, "soft", 1):
+        if not soft:
+            loc = getattr(e, "loc", None) or getattr(e.args[0], "loc", None)
+            raise UnsupportedConstructError(
+                "'soft' constraint here is not supported yet", loc=loc)
+        return [C.ConstraintSoft(expr=resolve_refs(e.args[0], resolve, prefix))]
+    # `dist x in [...]` there: ExprCall(dist, [x, item...]), an item a bare
+    # range (weight 1) or ExprCall(':=' / ':/', [range, weight]).
+    if (isinstance(e, E.ExprCall) and isinstance(e.func, E.ExprRefUnresolved)
+            and e.func.name == "dist" and len(e.args) >= 2):
+        if not soft:
+            loc = getattr(e, "loc", None) or getattr(e.args[0], "loc", None)
+            raise UnsupportedConstructError(
+                "'dist' constraint here is not supported yet", loc=loc)
+        res = lambda x: resolve_refs(x, resolve, prefix)
+        weights = []
+        for it in e.args[1:]:
+            if _is_call(it, ":=", 2) or _is_call(it, ":/", 2):
+                weights.append(C.DistWeight(rng=res(it.args[0]), weight=res(it.args[1]),
+                                            per_value=it.func.name == ":/"))
+            else:
+                weights.append(C.DistWeight(rng=res(it), weight=None, per_value=False))
+        return [C.ConstraintDist(target=res(e.args[0]), weights=weights)]
+    # `unique {a, b}` there: ExprCall(unique, [a, b]).
+    if (isinstance(e, E.ExprCall) and isinstance(e.func, E.ExprRefUnresolved)
+            and e.func.name == "unique" and len(e.args) >= 2):
+        return [C.ConstraintUnique(
+            items=[resolve_refs(x, resolve, prefix) for x in e.args])]
     # `a -> b` is carried as ExprCall(implies, [cond, body]) by ast2ir.
     if _is_implies_call(e):
         return [C.ConstraintImplies(
@@ -281,10 +595,14 @@ def expr_to_constraints(e, resolve, prefix=()) -> List[C.Constraint]:
 
 
 def _is_implies_call(e) -> bool:
+    return _is_call(e, "implies", 2)
+
+
+def _is_call(e, name, nargs) -> bool:
     return (isinstance(e, E.ExprCall)
             and isinstance(e.func, E.ExprRefUnresolved)
-            and e.func.name == "implies"
-            and len(e.args) == 2)
+            and e.func.name == name
+            and len(e.args) == nargs)
 
 
 # --------------------------------------------------------------------------- #
@@ -337,21 +655,27 @@ def ref_path(e):
 
     *root* is ``"self"`` (``TypeExprRefSelf``) or ``"traversed"``
     (``TypeExprRefTraversed``: the action a ``with`` block or an initializer
-    applies to). An element of a handle array with a constant index is one
-    path element, ``"arr[1]"``; any other index makes it not a path.
+    applies to). An element of an array with constant indices is one path
+    element, ``"arr[1]"`` (``"m[1][2]"``); any other index makes it not a
+    path. A data array's leaves are named by index instead (``("arr", "1")``):
+    :func:`index_path` gives that form.
     """
     path = []
     while True:
         if isinstance(e, E.ExprAttribute):
             path.append(e.attr)
             e = e.value
-        elif (isinstance(e, E.ExprSubscript) and isinstance(e.value, E.ExprAttribute)
-                and isinstance(e.slice, E.ExprConstant)
-                and isinstance(e.slice.value, int)):
-            path.append("%s[%d]" % (e.value.attr, e.slice.value))
-            e = e.value.value
-        else:
+            continue
+        idx = []
+        v = e
+        while (isinstance(v, E.ExprSubscript) and isinstance(v.slice, E.ExprConstant)
+                and isinstance(v.slice.value, int)):
+            idx.insert(0, v.slice.value)
+            v = v.value
+        if not idx or not isinstance(v, E.ExprAttribute):
             break
+        path.append(v.attr + "".join("[%d]" % i for i in idx))
+        e = v.value
     if not path:
         return None
     if isinstance(e, E.TypeExprRefSelf):
@@ -359,6 +683,23 @@ def ref_path(e):
     if isinstance(e, E.TypeExprRefTraversed):
         return "traversed", tuple(reversed(path))
     return None
+
+
+_INDEXED = re.compile(r"^([^\[]+)((?:\[\d+\])+)$")
+
+
+def index_path(path):
+    """*path* with each ``"a[1][2]"`` element split into ``"a", "1", "2"``:
+    the path of a data array's leaf (F6.1a; ``layout.value_leaves``)."""
+    out = []
+    for p in path:
+        m = _INDEXED.match(p)
+        if m is None:
+            out.append(p)
+        else:
+            out.append(m.group(1))
+            out.extend(re.findall(r"\d+", m.group(2)))
+    return tuple(out)
 
 
 def _aggregate_compare(e, resolve, prefix):
@@ -397,6 +738,43 @@ def _aggregate_compare(e, resolve, prefix):
                       values=terms)
 
 
+def _select(e, resolve, prefix):
+    """``arr[i]`` of a fixed-size array of scalars by a non-constant index
+    (a loop index a ``with`` reads, F8.4a): a choice among the elements'
+    slots, ``i == 0 ? arr[0] : i == 1 ? arr[1] : ... arr[n-1]``. None when
+    the base is not such an array (a list resolves to one slot instead).
+    An index past the end reads the last element."""
+    rp = ref_path(e.value)
+    if rp is None:
+        return None
+    root, path = rp
+    if root == "self":
+        path = prefix + path
+    if resolve(root, path) is not None:
+        return None
+    elems = []
+    while True:
+        p = path[:-1] + ("%s[%d]" % (path[-1], len(elems)),)
+        slot = resolve(root, p)
+        if slot is None and index_path(p) != p:
+            slot = resolve(root, index_path(p))
+        if slot is None:
+            break
+        elems.append(slot)
+    if not elems:
+        return None
+    idx = resolve_refs(e.slice, resolve, prefix)
+
+    def ref(slot):
+        return E.ExprRefField(base=E.TypeExprRefSelf(), index=slot)
+    out = ref(elems[-1])
+    for k in reversed(range(len(elems) - 1)):
+        out = E.ExprIfExp(test=E.ExprBin(lhs=idx, op=E.BinOp.Eq,
+                                         rhs=E.ExprConstant(value=k)),
+                          body=ref(elems[k]), orelse=out)
+    return out
+
+
 def resolve_refs(e, resolve, prefix=()):
     """Rewrite ``e``, replacing each resolvable reference with an ``ExprRefField``.
 
@@ -413,14 +791,32 @@ def resolve_refs(e, resolve, prefix=()):
     agg = _aggregate_compare(e, resolve, prefix)
     if agg is not None:
         return agg
+    if (isinstance(e, E.ExprCall) and not e.args and isinstance(e.func, E.ExprAttribute)
+            and e.func.attr == "size"):
+        # `l.size()`: the list resolves to its slot, read as an input array.
+        base = resolve_refs(e.func.value, resolve, prefix)
+        if isinstance(base, E.ExprRefField):
+            return dc.replace(e, func=E.ExprAttribute(value=base, attr="size"))
+        return e
+    if isinstance(e, E.ExprSubscript) and not isinstance(e.slice, E.ExprConstant):
+        sel = _select(e, resolve, prefix)
+        if sel is not None:
+            return sel
     rp = ref_path(e)
     if rp is not None:
         root, path = rp
         if root == "self":
             path = prefix + path
         slot = resolve(root, path)
+        if slot is None and index_path(path) != path:
+            slot = resolve(root, index_path(path))
         if slot is not None:
             return E.ExprRefField(base=E.TypeExprRefSelf(), index=slot)
+        if isinstance(e, E.ExprSubscript):
+            # `l[1]` of a list, one slot: an element the solver reads.
+            base = resolve_refs(e.value, resolve, prefix)
+            if isinstance(base, E.ExprRefField):
+                return dc.replace(e, value=base)
         if prefix and root == "self":
             # Not a scalar (a struct-valued path, or a name the layout does
             # not hold): keep it, rooted at the attribute, for the backend to

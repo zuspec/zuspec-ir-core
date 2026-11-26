@@ -5,13 +5,15 @@ import dataclasses as dc
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-from ...data_type import DataTypeClass, DataTypeComponent, DataTypeString
+from ...data_type import (DataTypeClass, DataTypeComponent, DataTypeFloat, DataTypeString,
+                          DataTypeList, DataTypeMap, DataTypeSet)
+from ...expr_phase2 import ExprList
 from ...activity import (
     ActivitySequenceBlock, ActivityAnonTraversal, ActivityTraversal,
     ActivityRepeat, ActivityForeach, ActivityIfElse, ActivityMatch, MatchCase,
     ActivityAtomic, ActivityParallel, ActivitySchedule, ActivitySelect,
     ActivityDoWhile, ActivityReplicate, ActivitySchedulingConstraint, ActivityFieldDecl,
-    ActivityConstraint, ActivityBind,
+    ActivityConstraint, ActivityBind, JoinKind,
 )
 from ...fields import FieldKind
 from ...scenario import (
@@ -19,20 +21,52 @@ from ...scenario import (
     ScSeq, ScInvoke, ScLoop, ScIf, ScMatch, ScMatchCase, ScAtomic,
     ScPar, ScSelect, ScSelectBranch, ScImport, ScImportDecl,
 )
-from ...stmt import StmtExpr, StmtAssign
-from ...expr import (Expr, ExprCall, ExprAttribute, TypeExprRefSelf, TypeExprRefTraversed,
+from ...stmt import Stmt, StmtExpr, StmtAssign, StmtSuper
+from ...expr import (Expr, ExprCall, ExprAttribute, ExprConstant, TypeExprRefSelf, TypeExprRefTraversed,
                      ExprRefUnresolved)
 from ..validate import ScenarioValidator, UnsupportedConstructError
 from .constraints import (LIFECYCLE_FUNCS, collect_solve_problem,
-                          is_pending_constraint)
-from .layout import object_layout, prefix_self, subst_names
-from .action_tree import Layouts, build_tree
+                          is_pending_constraint, type_constraints)
+from .layout import (action_fields, object_layout, struct_chain, prefix_self, subst_names,
+                     chain_renames, rename_members, is_struct)
+from .action_tree import Layouts, build_tree, plan_of_schedule, scheduling_constraints
 from .comp_tree import CompLayouts, build_comp_tree
+from .flow_checks import FlowChecks
+from .icl import IclTable
+from .pools import PoolTable
 
 _log = logging.getLogger("zuspec.ir.xf.pss_lower")
 
 _LIFECYCLE_FUNCS = LIFECYCLE_FUNCS
 _is_pending_constraint = is_pending_constraint
+
+#: The exec kinds (a function's ``metadata["exec_kind"]``) lowered, per kind
+#: of body: an action's by ``_exec_blocks``, a component's by
+#: ``build_comp_tree``. A struct's pre_solve/post_solve is refused where the
+#: attribute is solved (constraints.py ``_struct_sites``).
+LOWERED_EXEC_KINDS = {
+    "action": frozenset({"body", "pre_body", "pre_solve", "post_solve"}),
+    "component": frozenset({"init_down", "init_up", "run_start", "run_end"}),
+}
+
+#: Exec kinds the front end produces that nothing here runs yet: refused,
+#: with the block's location, rather than dropped. Any other kind outside
+#: its body's row of LOWERED_EXEC_KINDS is refused too.
+REFUSED_EXEC_KINDS: Dict[str, str] = {}
+
+
+def _holds_super(node) -> bool:
+    """Does statement *node* hold a ``super;`` below its top level?"""
+    for f in dc.fields(node) if dc.is_dataclass(node) else ():
+        v = getattr(node, f.name)
+        for x in (v if isinstance(v, (list, tuple)) else [v]):
+            if isinstance(x, StmtSuper):
+                return True
+            if isinstance(x, Stmt) or (dc.is_dataclass(x) and
+                                       type(x).__name__.startswith("Stmt")):
+                if _holds_super(x):
+                    return True
+    return False
 
 
 def _get_type_map(ctx: Any) -> Dict[str, Any]:
@@ -55,9 +89,10 @@ def _get_type_map(ctx: Any) -> Dict[str, Any]:
 def _field_layout(dt: Any, types: Dict[str, Any]) -> List[ScField]:
     """The action's object slots, in order: one per scalar, a struct
     attribute flattened to its leaves (``layout.object_layout``)."""
-    return [ScField(name=leaf.name, slot=i, datatype=leaf.datatype, rand=leaf.rand)
+    return [ScField(name=leaf.name, slot=i, datatype=leaf.datatype, rand=leaf.rand,
+                    loc=getattr(leaf.field, "loc", None))
             for i, leaf in enumerate(
-                object_layout(getattr(dt, "fields", []) or [], types))]
+                object_layout(action_fields(dt, types), types))]
 
 
 def _self_path(path) -> Any:
@@ -75,12 +110,16 @@ def _init_block(dt: Any, types: Dict[str, Any]) -> Optional[ScExecBlock]:
     attribute's initial value is applied too; its solve overwrites it.
     """
     stmts = []
-    for leaf in object_layout(getattr(dt, "fields", []) or [], types):
+    for leaf in object_layout(action_fields(dt, types), types):
         init = getattr(leaf.field, "initial_value", None)
         if init is not None:
             # A struct field's initializer is written against the struct.
             stmts.append(StmtAssign(targets=[_self_path(leaf.path)],
                                     value=prefix_self(init, leaf.path[:-1])))
+        elif isinstance(leaf.datatype, (DataTypeList, DataTypeMap, DataTypeSet)):
+            # A list, map or set attribute starts empty at each traversal,
+            # also of an object a loop traverses again.
+            stmts.append(StmtAssign(targets=[_self_path(leaf.path)], value=ExprList()))
     return ScExecBlock(kind="init", stmts=stmts) if stmts else None
 
 
@@ -206,26 +245,40 @@ class PSSToScenarioPass:
         self._imports = {}
         for fn_id, f in enumerate(getattr(ctx, "import_functions", []) or []):
             blocking = bool(getattr(f, "is_target", False)) and f.returns is None
-            arg_types, string_at = [], []
+            arg_types, string_at, struct_at = [], [], {}
             args = getattr(f, "args", None)
             for i, a in enumerate(getattr(args, "args", []) if args is not None else []):
                 ann = getattr(a, "annotation", None)
                 if isinstance(ann, DataTypeString):
                     string_at.append(i)
-                arg_types.append((getattr(ann, "bits", 32) or 32,
-                                  bool(getattr(ann, "signed", False))))
+                elif is_struct(ann, type_map):
+                    struct_at[i] = ann
+                # A float crosses as its binary64 bits (F6.6f2), float32 too.
+                arg_types.append((64, True) if isinstance(ann, DataTypeFloat)
+                                 else (getattr(ann, "bits", 32) or 32,
+                                       bool(getattr(ann, "signed", False))))
             ret_type = None
             if f.returns is not None:
                 if isinstance(f.returns, DataTypeString):
                     string_at.append("return")
-                ret_type = (getattr(f.returns, "bits", 32) or 32,
-                            bool(getattr(f.returns, "signed", False)))
+                elif is_struct(f.returns, type_map):
+                    struct_at["return"] = f.returns
+                if isinstance(f.returns, DataTypeFloat):
+                    # binary64 bits; the third item says a float comes back
+                    ret_type = (64, True, "float")
+                elif isinstance(f.returns, DataTypeString):
+                    # the host answers with text, made a heap string (F6.3b2)
+                    ret_type = (64, False, "string")
+                else:
+                    ret_type = (getattr(f.returns, "bits", 32) or 32,
+                                bool(getattr(f.returns, "signed", False)))
             self._imports[f.name] = {
                 "fn_id": fn_id, "blocking": blocking,
                 "arg_types": arg_types, "ret_type": ret_type}
             module.imports.append(ScImportDecl(
                 name=f.name, fn_id=fn_id, blocking=blocking,
-                arg_types=arg_types, ret_type=ret_type, string_at=string_at))
+                arg_types=arg_types, ret_type=ret_type, string_at=string_at,
+                struct_at=struct_at))
 
         # --- TraversalResolve (partial): gather actions, grouped by owner ---
         actions = self._collect_actions(type_map)
@@ -261,16 +314,21 @@ class PSSToScenarioPass:
             return any(self._comps.is_a(t, owner) for t in placed)
         owned = [(q, dt) for (q, dt) in actions
                  if q.rsplit("::", 1)[0] == root]
-        if not owned:
+        # A component with no actions can still be entered at its functions
+        # (a fixture of test functions, pssc P1.3).
+        if not owned and module.comp_tree is None:
             raise ValueError("root component %r owns no actions" % root)
         owned += [(q, dt) for (q, dt) in actions
                   if q.rsplit("::", 1)[0] != root and runs(q.rsplit("::", 1)[0])]
+        self._check_exec_kinds(placed, owned)
 
         # TraversalResolve: a traversal names its target by qualified action
         # type. A coroutine is keyed by its action's name relative to the
         # root component: the root's actions by simple name (``T``), any
         # other component's qualified (``sub_c::S``) -- unique, and a model
         # of the root's actions alone keeps its names (O5).
+        if module.comp_tree is not None:
+            self._prune_selects(root)
         self._layouts = Layouts(type_map)
         self._coro_of: Dict[str, str] = {}
         for qname, dt in owned:
@@ -311,7 +369,8 @@ class PSSToScenarioPass:
             coro.fields = _field_layout(dt, type_map)
             if self._cur_layout is not None:
                 coro.subtree = [
-                    ScField(name=name, slot=slot, datatype=leaf.datatype, rand=leaf.rand)
+                    ScField(name=name, slot=slot, datatype=leaf.datatype, rand=leaf.rand,
+                            loc=getattr(leaf.field, "loc", None))
                     for name, slot, leaf in self._layouts.subtree(qname)]
             init = _init_block(dt, type_map)
             if init is not None:
@@ -340,6 +399,9 @@ class PSSToScenarioPass:
                         "of the tree under %r" % (qname, root))
                 exports.append(self._coro_of[qname])
             module.export_actions = exports
+            params = getattr(ctx, "export_params", None) or {}
+            module.export_params = {self._coro_of[q]: list(n)
+                                    for q, n in params.items() if q in self._coro_of}
         else:
             module.export_actions = [n for n in self._auto_exports(module)
                                      if "::" not in n]
@@ -354,8 +416,37 @@ class PSSToScenarioPass:
                     comps=self._comps if module.comp_tree is not None else None,
                     root_comp=root)
                 module.trees[name].lookahead = self.lookahead
+                # an export the user named that cannot run is refused here
+                probs = module.trees[name].flow_problems
+                if probs and (self.exports is not None or declared):
+                    raise probs[0].error()
 
         return module
+
+    def _check_exec_kinds(self, placed, owned) -> None:
+        """Refuse, at its location, every exec block of a component in the
+        tree (or a base) or of an action that can run whose kind is not in
+        its body's row of LOWERED_EXEC_KINDS: nothing would run it."""
+        typed = []
+        for q in sorted(placed):
+            if isinstance(self._type_map.get(q), DataTypeComponent):
+                typed += [("component", q, t) for t in self._comps.chain(q)]
+        typed += [("action", q, dt) for q, dt in owned]
+        seen = set()
+        for body, qname, dt in typed:
+            if id(dt) in seen:
+                continue
+            seen.add(id(dt))
+            for fn in getattr(dt, "functions", []) or []:
+                kind = (getattr(fn, "metadata", None) or {}).get("exec_kind")
+                if kind is None or kind in LOWERED_EXEC_KINDS[body]:
+                    continue
+                why = REFUSED_EXEC_KINDS.get(
+                    kind, "is not supported in a %s" % body)
+                raise UnsupportedConstructError(
+                    "`exec %s` of %s %r %s" % (
+                        kind, body, getattr(dt, "name", qname), why),
+                    loc=getattr(fn, "loc", None))
 
     @staticmethod
     def _collect_functions(ctx: Any, type_map: Dict[str, Any]) -> Dict[str, Any]:
@@ -367,6 +458,14 @@ class PSSToScenarioPass:
         out: Dict[str, Any] = dict(getattr(ctx, "functions", {}) or {})
         for qname, dt in type_map.items():
             if not isinstance(dt, DataTypeComponent):
+                # An action's own functions (a pssc extension), inherited
+                # ones included: ``<action>::f``, called with the action's
+                # object as ``self``. One declared with no body is left out.
+                if "::" in qname and _is_action(dt):
+                    for f in getattr(dt, "functions", []) or []:
+                        meta = getattr(f, "metadata", None) or {}
+                        if meta.get("action_function") and not meta.get("abstract"):
+                            out.setdefault(f"{qname}::{f.name}", f)
                 continue
             for f in getattr(dt, "functions", []) or []:
                 meta = getattr(f, "metadata", None) or {}
@@ -437,22 +536,69 @@ class PSSToScenarioPass:
         body_ops: List = []
         pre_block: Optional[ScExecBlock] = None
         post_block: Optional[ScExecBlock] = None
-        pending = []
-        for f in dt.functions:
-            fname = getattr(f, "name", None)
-            if fname == "body":
-                # Split the exec body at blocking-import calls (each becomes a
-                # ScImport suspend point between straight-line ScExecBlocks).
-                body_ops = self._lower_exec_stmts(f.body, "body")
-            elif fname == "pre_solve":
-                pre_block = ScExecBlock(kind="pre_solve", stmts=list(f.body))
-            elif fname == "post_solve":
-                post_block = ScExecBlock(kind="post_solve", stmts=list(f.body))
-            elif _is_pending_constraint(f):
-                # A named constraint block (e.g. addr_aligned).  Carried until
-                # Phase 3 folds it into a ScSolveProblem.
-                pending.append(f)
+        # Named constraint blocks (e.g. addr_aligned), the bases' too.
+        # Carried until Phase 3 folds them into a ScSolveProblem.
+        pending = type_constraints(dt, self._type_map)
+        body = self._exec_stmts(dt, "body")
+        pre_body = self._exec_stmts(dt, "pre_body")
+        if pre_body is not None:
+            # exec pre_body runs after allocation, just before exec body
+            # (LRM 22.1.1); its locals share body's scope
+            body = pre_body + (body or [])
+        if body is not None:
+            # Split the exec body at blocking-import calls (each becomes a
+            # ScImport suspend point between straight-line ScExecBlocks).
+            body_ops = self._lower_exec_stmts(body, "body")
+        pre = self._exec_stmts(dt, "pre_solve")
+        if pre is not None:
+            pre_block = ScExecBlock(kind="pre_solve", stmts=pre)
+        post = self._exec_stmts(dt, "post_solve")
+        if post is not None:
+            post_block = ScExecBlock(kind="post_solve", stmts=post)
         return pre_block, post_block, body_ops, pending
+
+    def _exec_stmts(self, dt, kind: str, _ren=None) -> Optional[List]:
+        """The statements exec block *kind* of action *dt* runs (LRM 17.1):
+        its own block, else the nearest base's; each top-level ``super;`` in
+        it replaced by the base's block, expanded the same way. None if no
+        type in the chain declares one. A base's statements read a field
+        a derived type shadows, and ``super.f``, by the slot's name in *dt*
+        (``layout.chain_renames``)."""
+        if _ren is None:
+            try:
+                chain = struct_chain(dt, self._type_map)
+            except UnsupportedConstructError:
+                chain = [dt]
+            _ren = {id(t): r for t, r in zip(chain, chain_renames(chain))}
+        seen: List[Any] = []
+        while dt is not None:
+            if any(t is dt for t in seen):
+                raise UnsupportedConstructError(
+                    "action %r inherits from itself" % getattr(dt, "name", "?"),
+                    loc=getattr(dt, "loc", None))
+            seen.append(dt)
+            sup = getattr(dt, "super", None)
+            base = (self._type_map.get(getattr(sup, "ref_name", None))
+                    if sup is not None else None)
+            fn = next((f for f in getattr(dt, "functions", []) or []
+                       if getattr(f, "name", None) == kind), None)
+            if fn is None:
+                dt = base
+                continue
+            out: List = []
+            for st in fn.body:
+                if isinstance(st, StmtSuper):
+                    if base is not None:
+                        out.extend(self._exec_stmts(base, kind, _ren) or [])
+                else:
+                    if _holds_super(st):
+                        raise UnsupportedConstructError(
+                            "`super;` inside a statement of exec %s: only a "
+                            "top-level `super;` is supported" % kind,
+                            loc=getattr(st, "loc", None))
+                    out.append(rename_members(st, *_ren.get(id(dt), ({}, {}))))
+            return out
+        return None
 
     @staticmethod
     def _lifecycle(pre_block, post_block, main: List) -> List:
@@ -544,6 +690,11 @@ class PSSToScenarioPass:
                     "is not instantiated under %r (9.1.5.1)"
                     % (what, type_qname, type_qname.rsplit("::", 1)[0], self._root),
                     loc=s.getLoc())
+            if getattr(self._type_map.get(type_qname), "is_abstract", False):
+                raise UnsupportedConstructError(
+                    "traversal of %s: %r is an abstract action, which may not be "
+                    "traversed directly (10.2.3)" % (what, type_qname),
+                    loc=s.getLoc())
             raise UnsupportedConstructError(
                 "traversal of %s: %r is not an action" % (what, type_qname),
                 loc=s.getLoc())
@@ -566,51 +717,89 @@ class PSSToScenarioPass:
                     "replicate directly inside %s expands into branches; "
                     "that is P1" % kind, loc=st.getLoc())
 
-    def _check_schedule_members(self, s) -> None:
-        """Refuse a ``schedule`` whose members interact (design D4): a
-        scheduling constraint, or a member that -- directly or through the
-        activity of a compound action -- has a flow-object reference or a
-        resource claim."""
-        for st in _walk_activity(s.stmts):
-            if isinstance(st, ActivitySchedulingConstraint):
+    def _join_branches(self, s) -> List[int]:
+        """For ``join_branch(L1, ...)``: the indices, among the branches
+        :meth:`_lower_stmts` keeps, of the top-level branches those labels
+        name (LRM 13.3.6 a.1). A label names a labelled statement, or a
+        traversed handle."""
+        js = s.join_spec
+        if js is None or js.kind != JoinKind.BRANCH:
+            return []
+        labels = list(js.branch_labels) or ([js.branch_label] if js.branch_label else [])
+        names = {}
+        i = 0
+        for st in s.stmts:
+            if isinstance(st, (ActivityFieldDecl, ActivitySchedulingConstraint)) or (
+                    isinstance(st, (ActivityConstraint, ActivityBind))
+                    and self._cur_layout is not None):
+                continue
+            for n in (getattr(st, "label", None), getattr(st, "handle", None)):
+                if n:
+                    names.setdefault(n, i)
+            i += 1
+        out = []
+        for lb in labels:
+            if lb not in names:
                 raise UnsupportedConstructError(
-                    "schedule with a scheduling constraint needs the planner "
-                    "(P3/P4, design D4)", loc=st.getLoc())
-        seen = set()
-        for st in _walk_activity(s.stmts):
-            qname = getattr(st, "type_qname", None)
-            if isinstance(st, (ActivityTraversal, ActivityAnonTraversal)) \
-                    and qname is not None:
-                why = self._interaction(qname, seen)
-                if why is not None:
-                    raise UnsupportedConstructError(
-                        "schedule with interacting members (%s) needs the "
-                        "planner (P3/P4, design D4)" % why, loc=st.getLoc())
+                    "join_branch label %r is not a top-level branch of this "
+                    "block (LRM 13.3.6 a.1)" % lb, loc=s.getLoc())
+            if names[lb] not in out:
+                out.append(names[lb])
+        return out
 
-    def _interaction(self, qname: str, seen: set) -> Optional[str]:
-        """Why action *qname* interacts with others, or None."""
-        if qname in seen:
-            return None
-        seen.add(qname)
-        dt = self._type_map.get(qname)
-        chain = dt
-        while chain is not None:
-            for f in getattr(chain, "fields", []) or []:
-                if f.kind in (FieldKind.Input, FieldKind.Output):
-                    return "%s has flow-object reference %r" % (qname, f.name)
-                if f.kind in (FieldKind.Lock, FieldKind.Share):
-                    return "%s claims resource %r" % (qname, f.name)
-            sup = getattr(chain, "super", None)
-            chain = self._type_map.get(getattr(sup, "ref_name", None))
-        act = getattr(dt, "activity_ir", None)
-        for st in _walk_activity(act.stmts if act is not None else []):
-            sub = (st.type_qname if isinstance(
-                st, (ActivityTraversal, ActivityAnonTraversal)) else None)
-            if sub is not None:
-                why = self._interaction(sub, seen)
-                if why is not None:
-                    return why
-        return None
+    def _schedule_plan(self, s):
+        """The members of ``schedule`` *s* and their plan (M8b2, xf/plan):
+        members that exchange buffers or state run in a legal order the seed
+        picks, and members that lock the same resource type take turns.
+        Scheduling constraints over its members (LRM 16.2) add order
+        (``sequence``) or need them to start together (``parallel``), as
+        stream partners do (M8b4). Refused: a join policy over members that
+        interact."""
+        from ..plan import CycleError, ParallelError
+        act = getattr(self._cur_action, "activity_ir", None)
+        cons = scheduling_constraints([act] if act is not None else [])
+        try:
+            members, plan, used = plan_of_schedule(s, cons, self._type_map)
+        except CycleError as e:
+            raise UnsupportedConstructError(
+                "schedule members %s exchange buffers in a cycle, or a sequence "
+                "constraint orders them against their flow: no legal order "
+                "(LRM 13.3.5, 16.2 e)" % ", ".join(str(i + 1) for i in e.cycle),
+                loc=s.getLoc())
+        except ParallelError as e:
+            raise UnsupportedConstructError(
+                ("schedule members %s cannot run in parallel: they exchange flow "
+                 "objects, lock a resource or are sequenced (LRM 16.2 e)" if e.tied else
+                 "schedule members %s must start together, but one of them may "
+                 "wait for another member it exchanges flow objects or a "
+                 "resource with; not supported yet")
+                % ", ".join(str(i + 1) for i in e.members), loc=s.getLoc())
+        self._sched_used = getattr(self, "_sched_used", set()) | used
+        kind = s.join_spec.kind if s.join_spec is not None else None
+        if plan.interacts and kind not in (None, JoinKind.ALL):
+            raise UnsupportedConstructError(
+                "schedule with a %s join over members that exchange flow "
+                "objects or lock a resource is not supported yet" % kind.name, loc=s.getLoc())
+        return members, plan
+
+    def _lower_planned(self, s, members, plan) -> ScPar:
+        """``schedule`` *s* as planned: each group of members that interact
+        is one branch, a sequence in one of its legal orders, chosen by the
+        seed (a ``select`` when there are several); the rest run alone."""
+        lowered = [self._lower_stmts([m]) for m in members]
+        branches = []
+        for group, orders in zip(plan.groups, plan.orders):
+            if len(group) == 1:
+                branches.append(ScSeq(body=lowered[group[0]]))
+                continue
+            seqs = [[x for i in order for x in lowered[i]] for order in orders]
+            if len(seqs) == 1:
+                branches.append(ScSeq(body=seqs[0]))
+            else:
+                branches.append(ScSelect(branches=[ScSelectBranch(body=q)
+                                                   for q in seqs]))
+        return ScPar(branches=branches, join_spec=s.join_spec,
+                     scope=self._scope(s)).copy_loc(s)
 
     def _no_tree(self, what: str, loc=None):
         """Refuse *what*, which needs the current action's tree: with the
@@ -671,6 +860,24 @@ class PSSToScenarioPass:
                                   value=_root_traversed(rhs, path)))
         return out
 
+    def _prune_selects(self, root: str) -> None:
+        """Mark the select branches that can never run (M8b5a): the action
+        tree gives them no nodes and they are never chosen. A select left
+        with none, and no ``select[0..1]``-style ``allow_none``, is refused."""
+        checks = FlowChecks(IclTable(PoolTable(self._comps, root)))
+        selects = {}
+        for s, br, why in checks.dead_branches().values():
+            br.infeasible = why
+            selects[id(s)] = s
+        for s in selects.values():
+            if not getattr(s, "allow_none", False) \
+                    and all(b.infeasible is not None for b in s.branches):
+                raise UnsupportedConstructError(
+                    "no branch of this select can ever run: %s" % "; ".join(
+                        "branch %d: %s" % (i + 1, b.infeasible)
+                        for i, b in enumerate(s.branches)),
+                    loc=getattr(s, "loc", None))
+
     def _scope(self, block, part=None) -> Optional[int]:
         """The action tree's local scope *block* opens (``ScSeq.scope``...)."""
         lay = getattr(self, "_cur_layout", None)
@@ -684,9 +891,16 @@ class PSSToScenarioPass:
             return []
         # The activity's top-level block is the ACTIVITY scope (local 0); the
         # node's entry, not a statement, opens it.
-        if isinstance(act, ActivitySequenceBlock):
-            return self._lower_stmts(act.stmts)
-        return self._lower_stmts([act])
+        self._sched_used = set()
+        out = self._lower_stmts(act.stmts if isinstance(act, ActivitySequenceBlock)
+                                else [act])
+        for c in scheduling_constraints([act]):
+            if id(c) not in self._sched_used:
+                raise UnsupportedConstructError(
+                    "scheduling constraint relates statements that are not members "
+                    "of one schedule; v0 supports only that (LRM 16.2)",
+                    loc=c.getLoc())
+        return out
 
     def _lower_stmts(self, stmts) -> List:
         """A block's statements as ops. A declaration is not a statement: a
@@ -697,6 +911,8 @@ class PSSToScenarioPass:
             if isinstance(s, ActivityFieldDecl):
                 self._check_field_decl(s)
                 continue
+            if isinstance(s, ActivitySchedulingConstraint):
+                continue  # shapes its schedule (_schedule_plan)
             if isinstance(s, (ActivityConstraint, ActivityBind)) \
                     and self._cur_layout is not None:
                 # In force while its scope is (13.1.9 b.3): the action tree
@@ -724,6 +940,9 @@ class PSSToScenarioPass:
         Python-front-end flow bindings were not bound.
         """
         if getattr(s, "index", None) is not None and self._child_base(s) is None:
+            err = self._layouts.errors.get(self._cur_qname)
+            if err is not None:
+                raise err               # why the action has no tree
             # A constant index names a node of the action tree (P1.2); a
             # computed one would choose among them at run time.
             raise UnsupportedConstructError(
@@ -767,10 +986,11 @@ class PSSToScenarioPass:
             written = None
             if s.type_qname is None:
                 # Hand-built IR: the handle's declared type, as written.
-                for f in getattr(self._cur_action, "fields", []) or []:
+                for f in action_fields(self._cur_action, self._type_map):
                     if f.name == s.handle:
-                        written = getattr(getattr(f, "datatype", None),
-                                          "ref_name", None)
+                        dt = getattr(f, "datatype", None)
+                        dt = getattr(dt, "element_type", None) or dt
+                        written = getattr(dt, "ref_name", None)
                         break
             target = self._traversal_target(s, s.type_qname, written,
                                             what="handle %r" % s.handle)
@@ -828,21 +1048,30 @@ class PSSToScenarioPass:
         if isinstance(s, ActivityParallel):
             self._check_no_replicate_branches(s, "parallel")
             return ScPar(branches=self._lower_stmts(s.stmts),
-                         join_spec=s.join_spec, scope=self._scope(s)).copy_loc(s)
+                         join_spec=s.join_spec, join_branches=self._join_branches(s),
+                         scope=self._scope(s)).copy_loc(s)
 
         if isinstance(s, ActivitySchedule):
             # With members that do not interact, running them all in
-            # parallel is one legal schedule (LRM 11.3.5). Members that
-            # interact need the planner (P3/P4), so they are refused (D4).
+            # parallel is one legal schedule (LRM 11.3.5); members that
+            # interact run as planned (xf/plan).
             self._check_no_replicate_branches(s, "schedule")
-            self._check_schedule_members(s)
+            members, plan = self._schedule_plan(s)
+            if plan.interacts:
+                return self._lower_planned(s, members, plan)
             return ScPar(branches=self._lower_stmts(s.stmts),
-                         join_spec=s.join_spec, scope=self._scope(s)).copy_loc(s)
+                         join_spec=s.join_spec, join_branches=self._join_branches(s),
+                         scope=self._scope(s)).copy_loc(s)
 
         if isinstance(s, ActivitySelect):
+            # A branch that can never run keeps its place (weights, trace
+            # indices) behind a false guard.
             branches = [ScSelectBranch(guard=b.guard, weight=b.weight,
                                        body=self._lower_stmts(b.body),
                                        scope=self._scope(b))
+                        if b.infeasible is None else
+                        ScSelectBranch(guard=ExprConstant(value=False), weight=b.weight,
+                                       body=[], scope=self._scope(b))
                         for b in s.branches]
             return ScSelect(branches=branches,
                             allow_none=getattr(s, "allow_none", False)).copy_loc(s)

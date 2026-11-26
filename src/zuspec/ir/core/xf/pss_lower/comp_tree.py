@@ -22,6 +22,10 @@ bottom-up: the order LRM Example 281 lists.
 ``2 + D`` slots of the instance that declares it: ``c.$count``, ``c.$head``
 and ``c.$buf0`` .. ``c.$buf<D-1>``, a ring of scalar elements, all 0 at
 construction. A channel whose element is not a scalar stays one opaque slot.
+
+**A register group's handle is state of its instance.** A
+``reg_group_c`` (21.14.4) has one more slot, ``$handle``, after its fields:
+the address ``set_handle()`` binds it to, 0 at construction.
 """
 from __future__ import annotations
 
@@ -29,12 +33,25 @@ import dataclasses as dc
 from typing import Any, Dict, List, Optional, Tuple
 
 from ... import expr as E
-from ...data_type import (DataTypeArray, DataTypeChannel, DataTypeComponent,
-                          DataTypeInt, DataTypeRef)
+from ...data_type import (DataTypeArray, DataTypeChandle, DataTypeChannel,
+                          DataTypeComponent, DataTypeInt, DataTypeRef,
+                          DataTypeRegister, DataTypeRegisterGroup)
 from ...scenario import ScCompInit, ScCompInstance, ScComponentTree, ScField
 from ...stmt import StmtAssign
 from ..validate import UnsupportedConstructError
 from .layout import Leaf, field_leaves, is_struct, prefix_self, resolve
+
+#: A component instance's ``uid`` is this plus its instance id.
+COMP_UID_BASE = 0x40000000
+
+
+def _type_text(dt) -> str:
+    """Short text for register value type *dt*, for a type-map key."""
+    if isinstance(dt, DataTypeInt):
+        return "%s[%d]" % ("int" if dt.signed else "bit", dt.bits)
+    if isinstance(dt, DataTypeRef):
+        return dt.ref_name
+    return getattr(dt, "name", None) or type(dt).__name__
 
 
 def _loc(n):
@@ -58,6 +75,10 @@ def channel_leaves(f, types) -> Optional[List[Leaf]]:
            Leaf((f.name, "$head"), CHANNEL_INDEX, f, False)]
     out += [Leaf((f.name, "$buf%d" % i), elem, f, False) for i in range(dt.depth)]
     return out
+
+
+#: the slot of a register group's address handle
+HANDLE = "$handle"
 
 
 @dc.dataclass
@@ -124,7 +145,25 @@ class CompLayouts:
         tq = getattr(f, "type_qname", None)
         if tq is not None and isinstance(self.types.get(tq), DataTypeComponent):
             return tq
+        if not any(t is dt for t in self.types.values()):
+            return self._add_anonymous(dt)
         return self.qname_of(dt)
+
+    def _add_anonymous(self, dt) -> str:
+        """A key in the type map for *dt*, a specialization the type map
+        does not name: a field declared ``reg_c<bit[32], READWRITE, 32> R;``
+        (21.14) carries its own ``reg_c<None>`` object."""
+        base = getattr(dt, "name", None) or "anon"
+        if isinstance(dt, DataTypeRegister):
+            base = "reg_c<%s, %s, %s>" % (
+                _type_text(dt.register_value_type),
+                getattr(dt.access_mode, "name", dt.access_mode), dt.size_bits)
+        key, n = base, 1
+        while key in self.types:
+            n += 1
+            key = "%s#%d" % (base, n)
+        self.types[key] = dt
+        return key
 
     def chain(self, qname: str) -> List[Any]:
         """Component type *qname* and its bases, base first."""
@@ -142,7 +181,9 @@ class CompLayouts:
     def is_a(self, qname: str, base: str) -> bool:
         """Is component type *qname* *base* or derived from it?"""
         b = self.types.get(base)
-        return b is not None and any(t is b for t in self.chain(qname))
+        return b is not None and any(
+            t is b or getattr(t, "template", None) == base
+            for t in self.chain(qname))
 
     def function(self, qname: str, name: str, functions: Dict[str, Any]):
         """Function *name* of component type *qname*: its own, else the
@@ -207,6 +248,8 @@ class CompLayouts:
                     keys = [f.name]
                 for key in keys:
                     self._place(lay, key, self.get(tq, loc=_loc(f)))
+        if isinstance(lay.dt, DataTypeRegisterGroup):
+            lay.slots.append((HANDLE, Leaf((HANDLE,), DataTypeChandle(), None, False)))
         return lay
 
     @staticmethod
@@ -248,7 +291,7 @@ def build_comp_tree(layouts: CompLayouts, root: str) -> ScComponentTree:
     tree.instances.sort(key=lambda i: i.id)
     for slot, (name, leaf) in enumerate(lay.slots):
         tree.fields.append(ScField(name=name, slot=slot, datatype=leaf.datatype,
-                                   rand=False))
+                                   rand=False, loc=getattr(leaf.field, "loc", None)))
 
     # Initial values: each instance's own attributes, written against it.
     for inst in tree.instances:
@@ -257,15 +300,40 @@ def build_comp_tree(layouts: CompLayouts, root: str) -> ScComponentTree:
             for f in getattr(dt, "fields", []) or []:
                 if layouts.field_type(f) is not None:
                     continue
+                # A struct attribute with its own initializer (a struct
+                # literal) is one assignment; its leaves are its members.
+                finit = getattr(f, "initial_value", None)
+                if finit is not None:
+                    stmts.append(StmtAssign(
+                        targets=[E.ExprAttribute(value=E.TypeExprRefSelf(),
+                                                 attr=f.name)],
+                        value=finit))
+                    continue
+                done = set()
                 for leaf in field_leaves(f, layouts.types):
                     init = getattr(leaf.field, "initial_value", None)
                     if init is None:
                         continue
+                    # An array's leaves share its field: its initializer
+                    # (an aggregate literal) is one assignment to the array.
+                    path = tuple(leaf.path)
+                    while path and path[-1].isdigit():
+                        path = path[:-1]
+                    if path in done:
+                        continue
+                    done.add(path)
                     target: Any = E.TypeExprRefSelf()
-                    for p in leaf.path:
+                    for p in path:
                         target = E.ExprAttribute(value=target, attr=p)
                     stmts.append(StmtAssign(targets=[target],
-                                            value=prefix_self(init, leaf.path[:-1])))
+                                            value=prefix_self(init, path[:-1])))
+                if f.name == "uid" and getattr(dt, "super", None) is None:
+                    # The built-in uid (pssc ast2ir `_add_uid_fields`),
+                    # above any action uid (a run counter from 1).
+                    stmts.append(StmtAssign(
+                        targets=[E.ExprAttribute(value=E.TypeExprRefSelf(),
+                                                 attr="uid")],
+                        value=E.ExprConstant(value=COMP_UID_BASE + inst.id)))
         if stmts:
             tree.init.append(ScCompInit(instance=inst.id, kind="init", stmts=stmts))
     for inst in tree.instances:
@@ -278,6 +346,15 @@ def build_comp_tree(layouts: CompLayouts, root: str) -> ScComponentTree:
         if fn is not None and fn.body:
             tree.init.append(ScCompInit(instance=inst.id, kind="init_up",
                                         stmts=list(fn.body)).copy_loc(fn))
+    # Around the root action: run_start top-down, run_end
+    # bottom-up.
+    for kind, order, blocks in (("run_start", tree.instances, tree.run_start),
+                                ("run_end", _post_order(tree), tree.run_end)):
+        for inst in order:
+            fn = layouts.exec_block(inst.type_qname, kind)
+            if fn is not None and fn.body:
+                blocks.append(ScCompInit(instance=inst.id, kind=kind,
+                                         stmts=list(fn.body)).copy_loc(fn))
     return tree
 
 

@@ -368,10 +368,13 @@ class SelectBranch(Base):
         guard:  Optional boolean guard expression.
         weight: Optional integer weight expression.
         body:   Body statements for this branch.
+        infeasible: Why the branch can never run (set at lowering, M8b5a);
+                its body is then not lowered and it is never chosen.
     """
     guard: Optional['Expr'] = dc.field(default=None)
     weight: Optional['Expr'] = dc.field(default=None)
     body: List[ActivityStmt] = dc.field(default_factory=list)
+    infeasible: Optional[str] = dc.field(default=None)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitSelectBranch(self)

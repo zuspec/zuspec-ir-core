@@ -177,9 +177,14 @@ class ScSeq(ScStmt):
 @dc.dataclass(kw_only=True)
 class ScPar(ScStmt):
     """Fork ``branches`` concurrently; join per ``join_spec``
-    (ALL / FIRST(n) / NONE / SELECT)."""
+    (ALL / FIRST(n) / NONE / SELECT / BRANCH).
+
+    ``join_branches``: for a ``join_branch(L1, ...)`` join, the indices in
+    ``branches`` of the labelled branches the join waits for (LRM 13.3.6 a).
+    """
     branches: List[ScStmt] = dc.field(default_factory=list)
     join_spec: Optional['JoinSpec'] = dc.field(default=None)
+    join_branches: List[int] = dc.field(default_factory=list)
     scope: Optional[int] = dc.field(default=None)
 
     def accept(self, v: 'Visitor') -> None:
@@ -385,6 +390,9 @@ class ScImportDecl(Base):
                    (``"return"``, or an argument index), which the
                    ``(width, signed)`` tuples cannot describe. A consumer
                    that marshals scalars refuses a call to such an import.
+        struct_at: the positions (as for ``string_at``) whose declared
+                   type is a plain-data struct, mapped to that type; a
+                   backend passes such a value one field (leaf) at a time.
     """
     name: str = dc.field()
     fn_id: int = dc.field()
@@ -392,6 +400,7 @@ class ScImportDecl(Base):
     arg_types: List = dc.field(default_factory=list)
     ret_type: Optional[tuple] = dc.field(default=None)
     string_at: List = dc.field(default_factory=list)
+    struct_at: Dict = dc.field(default_factory=dict)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScImportDecl(self)
@@ -417,9 +426,33 @@ class ScSolveVar(Base):
     width: int = dc.field(default=32)
     signed: bool = dc.field(default=False)
     domain: Optional['Expr'] = dc.field(default=None)
+    input: bool = dc.field(default=False)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScSolveVar(self)
+
+
+@dc.dataclass(kw_only=True)
+class ScSolveArray(Base):
+    """A collection a :class:`ScSolveProblem`'s constraints read
+    (``x in l``, ``l.size()``): an input array of the solver problem, its
+    length and elements read from the collection when the problem is solved.
+
+    ``array_id`` is its index among the problem's arrays; ``slot`` the object
+    slot holding the collection, the index of the constraint's
+    ``ExprRefField``; ``width``/``signed`` its element type's.
+
+    ``rand``: a ``rand list`` whose elements the solve picks (F6.10e); its
+    length is still read from the list when solved, never chosen."""
+    name: str = dc.field()
+    array_id: int = dc.field()
+    slot: int = dc.field()
+    width: int = dc.field(default=32)
+    signed: bool = dc.field(default=False)
+    rand: bool = dc.field(default=False)
+
+    def accept(self, v: 'Visitor') -> None:
+        v.visitScSolveArray(self)
 
 
 class SolveStrategy(enum.Enum):
@@ -470,11 +503,14 @@ class ScSolveProblem(ScStmt):
                      own object slot); this records, for every array field slot, the
                      ordered element slots so ``foreach``/subscript lowering can
                      resolve ``arr[i]`` to the right element var.
+        input_arrays: Collections the constraints read, solved as input arrays
+                     sized per solve (:class:`ScSolveArray`).
     """
     vars: List[ScSolveVar] = dc.field(default_factory=list)
     constraints: List['Constraint'] = dc.field(default_factory=list)
     writeback: Dict[str, int] = dc.field(default_factory=dict)
     arrays: Dict[int, List[int]] = dc.field(default_factory=dict)
+    input_arrays: List[ScSolveArray] = dc.field(default_factory=list)
     strategy: SolveStrategy = dc.field(default=SolveStrategy.ELAB_NATIVE)
     seed: Optional['Expr'] = dc.field(default=None)
     members: List[str] = dc.field(default_factory=list)
@@ -578,6 +614,15 @@ class ScActionNode(Base):
     #: B5: the resources it claims, recorded when its solve commits and
     #: released when it completes
     claims: List['ScClaim'] = dc.field(default_factory=list)
+    #: F7.3: its transparent address claims, as ``(space, addr slot, size
+    #: slot, permanent slot or None)``; live from its solve until it
+    #: completes (or the end of the test, if permanent)
+    addr_claims: List[Tuple[str, int, int, Optional[int]]] = dc.field(default_factory=list)
+    #: F7.3e: its contiguous address claims (addr slot None in
+    #: :attr:`addr_claims`), placed first-fit after the solve, as ``(index
+    #: in addr_claims, alignment slot or None, ((trait field, slot), ...),
+    #: ``$addr`` slot or None)``: the run writes the placed address there (F7.4b)
+    addr_contig: List[Tuple[int, Optional[int], Tuple[Tuple[str, int], ...], Optional[int]]] = dc.field(default_factory=list)
     #: B5: the state objects it outputs, copied into their pools' current
     #: objects when it completes
     state_writes: List['ScStateWrite'] = dc.field(default_factory=list)
@@ -587,6 +632,18 @@ class ScActionNode(Base):
     #: B5: its buffer inputs bound to no output: each picks a completed
     #: object of its pool when the node is solved
     picks: List['ScBufferPick'] = dc.field(default_factory=list)
+    #: M9a3: a hidden node no activity traverses, inferred to feed buffer
+    #: input ``ref`` of node ``consumer``: ``(consumer, ref, candidate
+    #: index)``; its constraints hold only while bc runs it. None: traversed
+    inferred_for: Optional[Tuple[int, str, int]] = dc.field(default=None)
+    #: M9a5: per state input, the writers bc may infer first when the
+    #: pool's current object cannot satisfy it: ``(ref, [(instance, [node,
+    #: ...])])``, inferred nodes in candidate order (infer.py ``state_slots``)
+    state_infer: List[Tuple[str, List[Tuple[int, List[int]]]]] = dc.field(default_factory=list)
+    #: M9a6: per stream reference the activity pairs with nothing, the
+    #: partners bc may infer to start with this node: ``(ref, [(instance,
+    #: [node, ...])])`` (infer.py ``stream_slots``); bc runs exactly one
+    stream_infer: List[Tuple[str, List[Tuple[int, List[int]]]]] = dc.field(default_factory=list)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScActionNode(self)
@@ -604,6 +661,12 @@ class ScBufferPick(Base):
     slots: List[int] = dc.field(default_factory=list)
     sel_slot: int = dc.field()
     pools: List[Tuple[int, int]] = dc.field(default_factory=list)
+    #: ``(instance, candidates)``: the actions that may be inferred to feed
+    #: the input when the node runs in that instance (infer.py ``InferCand``)
+    infer: List[Tuple[int, Any]] = dc.field(default_factory=list)
+    #: M9a3: ``(instance, [node, ...])``: the inferred nodes (one per
+    #: inferred candidate of :attr:`infer`, in its order) bc may run first
+    infer_nodes: List[Tuple[int, List[int]]] = dc.field(default_factory=list)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScBufferPick(self)
@@ -697,6 +760,13 @@ class ScopeConstraintKind(enum.Enum):
     WITH     = "with"      # an inline `with`: at its traversal only (13.1.4)
     COMP     = "comp"      # a node's component is one of its candidates
                            # (13.4.5, P1-D4): while the node exists
+    INFER    = "infer"     # an inferred node's output is the input it feeds
+                           # (M9a3): while bc runs the inferred node
+
+
+#: Instances per busy-mask variable (ScScopeVar.busy_word): 63, since the
+#: solver's values are signed 64-bit, so a mask's bit 63 cannot be pinned.
+BUSY_WORD_BITS = 63
 
 
 @dc.dataclass(kw_only=True)
@@ -734,10 +804,23 @@ class ScScopeVar(Base):
     #: claims in force (:attr:`busy_lock`: the claim locks), free before
     busy_pool: Optional[int] = dc.field(default=None)
     busy_lock: bool = dc.field(default=True)
+    #: The word of that mask this variable holds: instances
+    #: BUSY_WORD_BITS*busy_word .. +width-1 (a pool over BUSY_WORD_BITS
+    #: instances has one variable per word)
+    busy_word: int = dc.field(default=0)
+    #: 16.4.4: a rand attribute of instance :attr:`attr_inst` of resource
+    #: pool :attr:`attr_pool` (a root variable): free until a claim takes
+    #: that instance, then held at the value that claim's solve chose
+    attr_pool: Optional[int] = dc.field(default=None)
+    attr_inst: int = dc.field(default=0)
     #: B5: a leaf (or the pool selector) of the node's buffer input
     #: :attr:`ScActionNode.picks` [:attr:`pick`]: free before the node is
     #: solved, pinned to the object picked when it is
     pick: Optional[int] = dc.field(default=None)
+    #: A list a constraint reads (``x in l``, ``l.size()``): not a scalar but
+    #: an input array of the solve, as long as the list is when the node is
+    #: solved; :attr:`width`/:attr:`signed` are its element type's
+    array: bool = dc.field(default=False)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScScopeVar(self)
@@ -878,7 +961,9 @@ class ScCompInstance(Base):
 class ScCompInit(Base):
     """One block of component-tree construction, run in one instance:
     ``self`` is that instance. ``kind`` is ``"init"`` (the attributes'
-    declared initial values), ``"init_down"`` or ``"init_up"``."""
+    declared initial values), ``"init_down"`` or ``"init_up"``; or
+    ``"run_start"`` / ``"run_end"`` (in :attr:`ScComponentTree.run_start`
+    and ``run_end``)."""
     instance: int = dc.field()
     kind: str = dc.field()
     stmts: List['Stmt'] = dc.field(default_factory=list)
@@ -901,12 +986,17 @@ class ScComponentTree(Base):
         init:       Construction, in order (9.1.4.1 d, 20.1.3): every
                     instance's initial values, then ``init_down`` top-down,
                     then ``init_up`` bottom-up (Example 281's order).
+        run_start:  ``exec run_start`` blocks, top-down: run before the
+                    root action.
+        run_end:    ``exec run_end`` blocks, bottom-up: run after it.
     """
     root: str = dc.field()
     size: int = dc.field(default=0)
     instances: List[ScCompInstance] = dc.field(default_factory=list)
     fields: List[ScField] = dc.field(default_factory=list)
     init: List[ScCompInit] = dc.field(default_factory=list)
+    run_start: List[ScCompInit] = dc.field(default_factory=list)
+    run_end: List[ScCompInit] = dc.field(default_factory=list)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScComponentTree(self)
@@ -1019,6 +1109,9 @@ class ScenarioModule(Base):
     functions: Dict[str, 'Function'] = dc.field(default_factory=dict)
     root: Optional[ScComponentInst] = dc.field(default=None)
     export_actions: List[str] = dc.field(default_factory=list)
+    #: An export's parameters (``export A1(bit mode);``, LRM 20.10), by its
+    #: coroutine name: the names of the action fields its caller sets.
+    export_params: Dict[str, List[str]] = dc.field(default_factory=dict)
     deferred_actions: List[str] = dc.field(default_factory=list)
     imports: List['ScImportDecl'] = dc.field(default_factory=list)
     entries: List[ScHarness] = dc.field(default_factory=list)
@@ -1065,6 +1158,7 @@ __all__ = [
     "ScImport",
     "ScImportDecl",
     "ScSolveVar",
+    "ScSolveArray",
     "SolveStrategy",
     "SolveInject",
     "ScSolveProblem",

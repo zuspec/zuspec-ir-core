@@ -41,6 +41,41 @@ class UnsupportedConstructError(Exception):
         super().__init__(full)
 
 
+class PssRuleError(UnsupportedConstructError):
+    """The PSS itself breaks an LRM rule (an illegal model, not a limit of
+    this lowering): callers report it as a compile error. A subclass, so a
+    caller that only knows :class:`UnsupportedConstructError` still stops."""
+
+
+_CLAIM_TYPES = ("addr_claim_base_s", "addr_claim_s",
+                "transparent_addr_claim_s")
+
+
+def _is_claim_type(name: str) -> bool:
+    """Is *name* one of addr_reg_pkg's claim structs, or a specialization of
+    one (``addr_reg_pkg::transparent_addr_claim_s_<params>``)?"""
+    pkg, _, base = (name or "").rpartition("::")
+    if pkg.rpartition("::")[2] != "addr_reg_pkg":
+        return False
+    return any(base == t or base.startswith(t + "_") for t in _CLAIM_TYPES)
+
+
+def _claim_fields(dt, path=(), _seen=()):
+    """``(path, field)`` for every address-claim field of *dt*, including
+    inside struct fields (a claim in a struct is still a claim)."""
+    from ..data_type import DataTypeRef, DataTypeStruct
+    for f in getattr(dt, "fields", None) or []:
+        ft = getattr(f, "datatype", None)
+        name = (getattr(ft, "ref_name", None) if isinstance(ft, DataTypeRef)
+                else getattr(ft, "name", None))
+        if name and _is_claim_type(name):
+            yield path + (f.name,), f
+        elif (isinstance(ft, DataTypeStruct)
+              and not isinstance(ft, DataTypeClass)
+              and id(ft) not in _seen):
+            yield from _claim_fields(ft, path + (f.name,), _seen + (id(ft),))
+
+
 class ScenarioValidator:
     """Validates Layer-0 actions against the iteration-1 supported subset."""
 
@@ -70,6 +105,22 @@ class ScenarioValidator:
         # An action with neither an exec body nor an activity is legal PSS:
         # it lowers to a coroutine that only solves (and runs its pre/post
         # solve), so a traversal of it runs *it*, not some other action.
+
+        # Address claims (LRM 24.8) are allocated at solve time; until that
+        # exists (F7.3) a claim would be solved as a plain struct, with no
+        # region, alignment or non-overlap, so it is refused here by name,
+        # unless the front end placed it (a ``_claim_alloc`` constraint).
+        placed = {(g.metadata or {}).get("_claim_alloc")
+                  for g in getattr(dt, "functions", None) or []}
+        for path, f in _claim_fields(dt):
+            if ".".join(path) in placed:
+                continue
+            raise UnsupportedConstructError(
+                "address claim %r in action %r: address claims are not "
+                "allocated yet" % (".".join(path), qname),
+                loc=f.getLoc() if hasattr(f, "getLoc") else dt.getLoc(),
+                remedy="give the buffer a fixed address, or wait for claim "
+                       "allocation (address-space-bc-design.md)")
 
     # ------------------------------------------------------------------
     # Layer-1 pre-flight: enumerate *every* unsupported construct at once.

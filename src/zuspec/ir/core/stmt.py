@@ -3,6 +3,7 @@ import dataclasses as dc
 from typing import Any, Dict, Optional, List
 from .base import Base
 from .expr import Expr, AugOp
+from .constraint import DistWeight
 
 @dc.dataclass(kw_only=True)
 class Alias(Base):
@@ -154,8 +155,12 @@ class StmtCover(Stmt):
 
 @dc.dataclass(kw_only=True)
 class StmtUnique(Stmt):
-    """Represents a uniqueness constraint: all listed variables must have distinct values."""
+    """Represents a uniqueness constraint: all listed variables must have distinct values.
+
+    ``items`` holds every operand as an expression (a path such as ``s.x`` too);
+    ``vars`` holds the names only when every operand is a field of this type."""
     vars: List[str] = dc.field(default_factory=list)
+    items: List[Expr] = dc.field(default_factory=list)
 
 @dc.dataclass(kw_only=True)
 class StmtDefault(Stmt):
@@ -174,6 +179,27 @@ class StmtDefaultDisable(Stmt):
     """``default disable target;`` (LRM 13.1.11): removes the defaults of
     lower precedence on *target*, or on every scalar under it."""
     target: Expr = dc.field()
+
+@dc.dataclass(kw_only=True)
+class StmtSoft(Stmt):
+    """``soft expr;`` in a constraint block (LRM 13.1.12): a constraint the
+    solver drops when it contradicts a hard one or a soft one of higher
+    priority. Priority follows declaration (later, derived, extension
+    outranks), so a consumer keeps the statements in the order given."""
+    expr: Expr = dc.field()
+
+@dc.dataclass(kw_only=True)
+class StmtDist(Stmt):
+    """``dist target in [items];`` in a constraint block (LRM 13.1.13).
+
+    Each item is a :class:`~zuspec.ir.core.constraint.DistWeight`: ``rng`` an
+    ``ExprRange`` (``upper`` None for one value), ``weight`` None for the
+    default weight 1, ``per_value`` True for ``:/`` (the weight divided
+    across the range) and False for ``:=`` (the weight given to each value).
+    It is a soft preference below every ``soft`` constraint; it does not
+    itself require ``target`` to be in the list."""
+    target: Expr = dc.field()
+    weights: List[DistWeight] = dc.field(default_factory=list)
 
 # Phase3: With/Try/Except + Phase2 module-level nodes
 @dc.dataclass(kw_only=True)

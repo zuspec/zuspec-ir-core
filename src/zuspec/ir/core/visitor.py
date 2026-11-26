@@ -260,6 +260,9 @@ class Visitor:
     def visitScSolveVar(self, o):
         pass
 
+    def visitScSolveArray(self, o):
+        pass
+
     def visitSolveInject(self, o):
         pass
 
@@ -328,7 +331,7 @@ class Visitor:
     def visitScComponentTree(self, o):
         for inst in o.instances:
             inst.accept(self)
-        for blk in o.init:
+        for blk in o.init + o.run_start + o.run_end:
             blk.accept(self)
 
     def visitScRootAction(self, o):
