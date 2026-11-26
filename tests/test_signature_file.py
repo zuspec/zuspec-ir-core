@@ -70,6 +70,51 @@ def test_channel_stage_flop_and_struct_payload_round_trip():
     assert rec.fields[2].datatype.size == 4
 
 
+
+def _four_state_sig():
+    """A block with 4-state ports: a logic channel, a 2-state one, a struct with
+    a logic field, and a logic data port."""
+    sig = _sig()
+    sig.channels[0].payload = ir.DataTypeInt(bits=9, signed=False, four_state=True)
+    sig.channels[1].payload = ir.DataTypeInt(bits=32, signed=False, four_state=False)
+    sig.channels.append(ir.ChannelSignature(
+        name="rec", direction="out",
+        payload=ir.DataTypeStruct(name="rec_t", super=None, fields=[
+            ir.Field(name="a", datatype=ir.DataTypeInt(bits=4, four_state=True)),
+            ir.Field(name="m", datatype=ir.DataTypeArray(
+                size=2, element_type=ir.DataTypeInt(bits=8, four_state=True)))])))
+    return sig
+
+
+def test_four_state_round_trip():
+    """An int payload carries ``four_state`` only when true (F8a, additive)."""
+    sig = _four_state_sig()
+    d = ir.signature_to_json(sig)
+    assert d["version"] == 3
+    assert d["channels"][0]["payload"] == {"kind": "int", "bits": 9, "signed": False,
+                                           "four_state": True}
+    assert "four_state" not in d["channels"][1]["payload"]     # 2-state: omitted
+    back = ir.signature_from_json(json.loads(json.dumps(d)))
+    assert ir.signature_to_json(back) == d
+    assert back.channel("in").payload.four_state is True
+    assert back.channel("out").payload.four_state is None      # absent: unstated
+    rec = back.channel("rec").payload
+    assert rec.fields[0].datatype.four_state is True
+    assert rec.fields[1].datatype.element_type.four_state is True
+
+
+def test_two_state_signatures_unchanged():
+    """Signatures without 4-state types write exactly as before the field."""
+    for sig in (_sig(), _fn_sig()):
+        text = json.dumps(ir.signature_to_json(sig))
+        assert "four_state" not in text
+
+
+def test_explicit_false_four_state_reads():
+    d = ir.signature_to_json(_sig())
+    d["channels"][0]["payload"]["four_state"] = False
+    assert ir.signature_from_json(d).channel("in").payload.four_state is False
+
 def _fn_sig():
     """A pipelined XLS function block, as gcd's codegen describes it."""
     u8 = ir.DataTypeInt(bits=8, signed=False)

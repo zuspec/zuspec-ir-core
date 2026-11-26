@@ -13,7 +13,7 @@ from zuspec.ir.core.schemas import SCHEMAS, schema
 
 from test_anchor import component
 from test_results import overlay_for
-from test_signature_file import _fn_sig, _sig
+from test_signature_file import _fn_sig, _four_state_sig, _sig
 
 
 def check(d):
@@ -38,6 +38,7 @@ def test_written_files_validate(tmp_path):
     sig.channels[0].stage, sig.channels[0].flop_kind = 0, "flop"
     check(ir.signature_to_json(sig))
     check(ir.signature_to_json(_fn_sig()))
+    check(ir.signature_to_json(_four_state_sig()))
 
 
 def test_schemas_reject_wrong_versions_and_qualities():
@@ -50,3 +51,15 @@ def test_schemas_reject_wrong_versions_and_qualities():
     o["facts"]["sched.stage"]["quality"][0] = "approximate"
     with pytest.raises(jsonschema.ValidationError):
         check(o)
+
+
+def test_signature_schema_checks_payloads():
+    """The v3 schema describes payload types, ``four_state`` included."""
+    d = ir.signature_to_json(_four_state_sig())
+    d["channels"][0]["payload"]["four_state"] = "yes"
+    with pytest.raises(jsonschema.ValidationError):
+        check(d)
+    d = ir.signature_to_json(_sig())
+    d["channels"][0]["payload"] = {"kind": "int"}               # no bits
+    with pytest.raises(jsonschema.ValidationError):
+        check(d)

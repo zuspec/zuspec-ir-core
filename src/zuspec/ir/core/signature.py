@@ -104,13 +104,19 @@ SIGNATURE_VERSION = 3
 #: ``flop_kind`` and struct and array payloads. Version 3 added ``kind``,
 #: ``data_ports`` and ``valid_ports`` for function blocks; a version-2 reader
 #: would see a function block as having no pins, hence the bump. Version-1
-#: and -2 files read as procs.
+#: and -2 files read as procs. An int payload's optional ``four_state`` is an
+#: additive field (no bump): written only when true; absent reads as unstated.
 _READABLE_VERSIONS = (1, 2, 3)
 
 
 def _payload_to_json(t: DataType) -> Dict[str, Any]:
     if isinstance(t, DataTypeInt):
-        return {"kind": "int", "bits": t.bits, "signed": t.signed}
+        d = {"kind": "int", "bits": t.bits, "signed": t.signed}
+        if t.four_state:
+            # Written only when true, so 2-state and unstated types read as
+            # before (formats.md "Block signature").
+            d["four_state"] = True
+        return d
     if isinstance(t, DataTypeArray):
         return {"kind": "array", "size": t.size, "element": _payload_to_json(t.element_type)}
     if isinstance(t, DataTypeStruct):
@@ -123,7 +129,9 @@ def _payload_to_json(t: DataType) -> Dict[str, Any]:
 def _payload_from_json(d: Dict[str, Any]) -> DataType:
     kind = d.get("kind")
     if kind == "int":
-        return DataTypeInt(bits=int(d["bits"]), signed=bool(d.get("signed", False)))
+        fs = d.get("four_state")
+        return DataTypeInt(bits=int(d["bits"]), signed=bool(d.get("signed", False)),
+                           four_state=None if fs is None else bool(fs))
     if kind == "array":
         return DataTypeArray(size=int(d["size"]), element_type=_payload_from_json(d["element"]))
     if kind == "struct":

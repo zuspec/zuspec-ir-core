@@ -62,7 +62,7 @@ from .data_type import (
     DataTypeExpr, DataTypeEnum, DataTypeString, DataTypeChandle,
     DataTypeList, DataTypeArray, DataTypeMap, DataTypeSet,
     DataTypeLock, DataTypeEvent, DataTypeMemory,
-    DataTypeAddressSpace, DataTypeAddrHandle, DataTypeProtocol, DataTypeRef,
+    DataTypeAddressSpace, DataTypeAddrHandle, DataTypeProtocol, DataTypeRef, DataTypeMemberRef, TypeDef,
     DataTypeGetIF, DataTypePutIF, DataTypeChannel, DataTypeTuple, DataTypeTupleReturn,
     DataTypeClaimPool,
     Function, Process, ProcessKind, FlowKind, AccessMode,
@@ -74,6 +74,7 @@ from .data_type import (
     DataTypeRegister, DataTypeRegisterGroup,
     # Interface-protocol types
     IfProtocolProperties, IfProtocolType, CompletionType, QueueType,
+    SyncXingDir, DataTypeSyncXing,
 )
 from .domain import (
     DomainRel, DomainSeverity, DomainDerivDecl, DataTypeDomainKind, DataTypeDomain,
@@ -85,12 +86,13 @@ from .protocol_hub import (
     BundleProtocol, ApiEndpoint, ApiConnection, CfgPublisher, CfgConsumer, CfgConnection,
     CfgListener,
 )
-from .proc_block import ProcKind, ProcBlock, ExprInReset
+from .proc_block import ProcKind, ProcBlock, ExprInReset, XingPort, SyncXingUse, SyncXingRecord
+from .package import Package, PackageImport, PackageConst, PackageType
 from .expr import (
     Expr, BinOp, UnaryOp, BoolOp, CmpOp, AugOp,
     ExprBin, ExprRef, ExprConstant, int_literal_type, TypeExprRefSelf, TypeExprRefSuper, TypeExprRefTraversed,
     ExprRefField,
-    ExprRefParam, ExprRefLocal, ExprRefUnresolved, ExprRefPy,
+    ExprRefParam, ExprRefLocal, ExprRefUnresolved, ExprRefPackage, ExprRefPy,
     ExprRefBottomUp, ExprUnary, ExprBool, ExprCompare,
     ExprAttribute, ExprSlice, ExprSubscript, ExprCall, Keyword, ExprAwait,
     # PSS-specific expressions (Phase 1)
@@ -200,11 +202,12 @@ __all__ = [
     "ProtoDir","ProtocolRef","ProtocolApi","DataTypeProtocolHub","ProtocolConverter",
     "BundleProtocol","ApiEndpoint","ApiConnection","CfgPublisher","CfgConsumer","CfgConnection",
     "CfgListener",
-    "ProcKind","ProcBlock","ExprInReset",
+    "ProcKind","ProcBlock","ExprInReset","XingPort","SyncXingUse","SyncXingRecord",
+    "Package","PackageImport","PackageConst","PackageType",
     "DataTypeExpr","DataTypeEnum","DataTypeString","DataTypeChandle",
     "DataTypeList","DataTypeArray","DataTypeMap","DataTypeSet",
     "DataTypeLock","DataTypeEvent","DataTypeMemory",
-    "DataTypeAddressSpace","DataTypeAddrHandle","DataTypeProtocol","DataTypeRef",
+    "DataTypeAddressSpace","DataTypeAddrHandle","DataTypeProtocol","DataTypeRef","DataTypeMemberRef","TypeDef",
     "DataTypeGetIF","DataTypePutIF","DataTypeChannel","DataTypeTuple","DataTypeTupleReturn",
     "DataTypeClaimPool",
     "Function","Process","ProcessKind","FlowKind","AccessMode",
@@ -216,8 +219,9 @@ __all__ = [
     "DataTypeRegister","DataTypeRegisterGroup",
     # Interface-protocol types
     "IfProtocolProperties","IfProtocolType","CompletionType","QueueType",
+    "SyncXingDir","DataTypeSyncXing",
     "Expr","BinOp","UnaryOp","BoolOp","CmpOp","AugOp","ExprBin","ExprRef","ExprConstant","int_literal_type",
-    "TypeExprRefSelf","TypeExprRefSuper","TypeExprRefTraversed","ExprRefField","ExprRefParam","ExprRefLocal","ExprRefUnresolved",
+    "TypeExprRefSelf","TypeExprRefSuper","TypeExprRefTraversed","ExprRefField","ExprRefParam","ExprRefLocal","ExprRefUnresolved","ExprRefPackage",
     "ExprRefPy","ExprRefBottomUp","ExprUnary",
     "ExprBool","ExprCompare","ExprAttribute","ExprSlice","ExprSubscript","ExprCall","Keyword","ExprAwait",
     # PSS-specific expressions

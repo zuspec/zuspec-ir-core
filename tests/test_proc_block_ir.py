@@ -72,3 +72,64 @@ def test_round_trips():
     assert isinstance(tick.body[0].test, ir.ExprInReset)
     assert tick.body[0].test.reset.kind == "reset"
     assert isinstance(tick.writes[0][0], ir.ExprHierarchicalElem)
+
+
+def test_task_block_and_xing_port_round_trip():
+    """A task block (run()) with reads and writes, and a derived crossing
+    port with its default step block (fw-hdl-spec processes.md, C5)."""
+    clk = ir.DomainRef(kind="clock", target=["out"])
+    run = ir.ProcBlock(name="run", kind=ir.ProcKind.TASK, func="run",
+                       reads=[["out", "ready"]],
+                       writes=[["out", "valid"], ["out", "data"]])
+    dflt = ir.ProcBlock(name="dflt", kind=ir.ProcKind.STEP, func="dflt",
+                        clock=clk, reads=[["out", "ready"]],
+                        writes=[["out", "valid"]])
+    comp = ir.DataTypeComponent(name="drv", super=None, fields=[],
+                                proc_blocks=[run, dflt])
+    ctxt = ir.Context(type_m={"drv": comp})
+    text = IRSerializer().serialize(ctxt, None)
+    d = IRDeserializer()
+    d.auto_register(ir)
+    back, _ = d.deserialize(text)
+    assert back.type_m == ctxt.type_m
+    run_b = back.type_m["drv"].proc_blocks[0]
+    assert run_b.kind == ir.ProcKind.TASK and run_b.clock is None
+    assert run_b.reads == [["out", "ready"]]
+
+    p = ir.XingPort(path=["out", "valid"], read=False, written=True,
+                    default="dflt", clock=clk)
+    assert p.reset is None
+    text = IRSerializer().serialize(p, None)
+    back_p, _ = d.deserialize(text)
+    assert back_p == p
+
+
+def test_task_code_and_xing_record_round_trip():
+    """A task block's code and arguments, and a component's lowered
+    crossings (fw-hdl xtor-shell-plan.md T1/T2)."""
+    i32 = ir.DataTypeInt(bits=32, signed=True)
+    put = ir.StmtExpr(expr=ir.ExprAwait(value=ir.ExprCall(
+        func=ir.ExprAttribute(value=_f(0), attr="put"), args=[ir.ExprRefLocal(name="x")])))
+    xfer = ir.StmtExpr(expr=ir.ExprAwait(value=ir.ExprCall(
+        func=ir.ExprAttribute(value=ir.ExprHierarchical(
+            elements=[ir.ExprHierarchicalElem(name="p")]), attr="xfer"),
+        args=[ir.ExprRefLocal(name="y"), ir.ExprRefLocal(name="x")])))
+    task = ir.ProcBlock(name="xfer", kind=ir.ProcKind.TASK, func="xfer", body=[put, xfer],
+                        args=[ir.Arg(arg="y", datatype=i32, direction=ir.SignalDirection.OUTPUT),
+                              ir.Arg(arg="x", datatype=i32, direction=ir.SignalDirection.INPUT)])
+    rec = ir.SyncXingRecord(path=["u", "reqs"], direction=ir.SyncXingDir.FROM_SYNC,
+                            element_type=i32, depth=1,
+                            ports={"valid": "u_reqs_valid", "ready": "u_reqs_ready",
+                                   "data": "u_reqs_data", "wait": "u_reqs_wait"})
+    comp = ir.DataTypeComponent(name="x", super=None, fields=[], proc_blocks=[task],
+                                sync_xings=[rec])
+    ctxt = ir.Context(type_m={"x": comp})
+    text = IRSerializer().serialize(ctxt, None)
+    d = IRDeserializer()
+    d.auto_register(ir)
+    back, _ = d.deserialize(text)
+    assert back.type_m == ctxt.type_m
+    b = back.type_m["x"]
+    assert b.sync_xings[0].direction is ir.SyncXingDir.FROM_SYNC
+    assert b.sync_xings[0].ports["wait"] == "u_reqs_wait"
+    assert b.proc_blocks[0].args[0].direction is ir.SignalDirection.OUTPUT

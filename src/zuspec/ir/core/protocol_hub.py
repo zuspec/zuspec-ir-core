@@ -101,12 +101,18 @@ class ApiEndpoint(Base):
     - ``kind``: ``port``, ``export``, ``socket`` or ``target_socket``;
     - ``api``: the API's name (port, export), or ``protocol`` (sockets);
     - ``imp``: the path of the implementation set by ``set_imp``; ``[]``
-      is derived (the owner).
+      is derived (the owner);
+    - ``api_params``: a parameterized API's specialization, its template
+      parameters by name, in declaration order (as ``ProtocolRef.params``);
+    - ``api_scope``: the scope that declares the API (an SV package), for a
+      back end that names it qualified; None when it has none.
     """
     name: str = dc.field()
     kind: str = dc.field()
     api: Optional[str] = dc.field(default=None)
     protocol: Optional[ProtocolRef] = dc.field(default=None)
+    api_params: Dict[str, Expr] = dc.field(default_factory=dict)
+    api_scope: Optional[str] = dc.field(default=None)
     imp: List[PathElem] = dc.field(default_factory=list)
 
 

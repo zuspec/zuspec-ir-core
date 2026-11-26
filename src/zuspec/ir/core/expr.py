@@ -175,6 +175,13 @@ class ExprRefUnresolved(ExprRef):
 
 
 @dc.dataclass(kw_only=True)
+class ExprRefPackage(ExprRef):
+    """A package member (a constant or a function): SV ``pkg::name``."""
+    package: str = dc.field()
+    name: str = dc.field()
+
+
+@dc.dataclass(kw_only=True)
 class ExprRefPy(ExprRef):
     """Reference relative to a Python object (base)"""
     base : Expr = dc.field()

@@ -3,6 +3,7 @@
 ## Unreleased (Phase 0: results as IR)
 
 ### Added
+- **Lowered transactor inputs** (fw-hdl xtor-shell-plan T1/T2/T4): `SyncXingRecord` (a lowered crossing: path, direction, item type, depth, port name per role), in the new `DataTypeComponent.sync_xings`; `ProcBlock.args` (a task block's formal arguments), and a task block's `body` now holds its code; `DataTypeComponent.task_blocks`, the task blocks the crossing lowering keeps apart from the RTL blocks; `ApiEndpoint.api_params` (a parameterized API's specialization) and `ApiEndpoint.api_scope` (the scope that declares the API), for the bridge (T4). All of it round-trips through the serializer.
 - **`Arg.direction`** (fw-hdl protocol-kit K5.2c): an argument's direction, a `SignalDirection`, or None.
 - **Anchors** (`anchor.py`, `docs/anchors.md`): stable, name-first identity for every type, member, statement and expression.
   - `assign_anchors` and `AnchorTable` (format `zuspec.anchor-table` v2), with scope hashes.
@@ -25,6 +26,9 @@
   - Later (fw-hdl protocol-kit-followups F3): `DataTypeProtocolHub` loses `cfg_type`, `functions`, `xfer_time` and `mismatch`. The spec puts configuration on endpoints and timing on channels, and nothing set them. `DataTypeBundle` gains `bundle_protocol` (fw-hdl-fe-sv writes bundle classes as `DataTypeBundle`).
   - Later (F4): `CfgListener` (a listener registered on a configuration sink) in the new `DataTypeComponent.cfg_listeners`. The IR connects a change to the sinks and listeners it reaches; it does not carry values.
 - **Process-block IR** (`proc_block.py`, fw-hdl core-layer2 §7): `ProcBlock` (a class-written component's `step` or `comb` block, `ProcKind`: its function and body, the `clock` and `reset` `DomainRef`s of a step block, its `reset_body` from `reset_state()`, and the paths it `writes`) in the new `DataTypeComponent.proc_blocks`; `ExprInReset`, a reset domain's assertion in a lowered body. Round-trips through the serializer.
+  - Later (fw-hdl sync-task-domains X1): `ProcKind.TASK`, a component's task code (`run()`), never lowered; `ProcBlock.reads`, the signals a block reads; `XingPort`, a crossing port (fw-hdl-spec `processes.md`, Crossings) that a pass derives from a component's blocks, with the step block that gives its default. Round-trips through the serializer.
+- **Packages** (`package.py`, fw-hdl protocol-kit-followups §18, Q19): `Package` (its `items` in source order: `PackageImport`, `PackageConst`, package-scope `Function` and `PackageType`, a type named by its qualified name and defined in `type_m`), with `imports`/`constants`/`functions`/`types` accessors; `Context.packages`. `ExprRefPackage` refers to a package member (`pkg::name`). All of it round-trips through the serializer.
+- **Class-scope types** (§18, Q20): `TypeDef` (a local name for a type), in `DataTypeClass.typedefs` and `DataTypeProtocol.typedefs` (source order, written over a template's parameters), and `DataTypeMemberRef` (`member` of `base`: SV `axi4_types #(P)::aw_t`, `t::aw_t`).
 - **`DataTypeParameterized.body`** (fw-hdl protocol-kit-plan K5.2): a template's body (an SV parameterized class), written over its parameters.
 - **JSON Schemas** for all four formats (`schemas/`, `docs/formats.md`), and `jsonschema` as a `test` extra.
 

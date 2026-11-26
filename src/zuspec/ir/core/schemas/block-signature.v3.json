@@ -109,10 +109,13 @@
       }
      },
      "payload": {
-      "$comment": "A DataType as signature JSON: int, struct or array (signature.py _payload_to_json).",
-      "type": [
-       "object",
-       "null"
+      "anyOf": [
+       {
+        "$ref": "#/$defs/payload"
+       },
+       {
+        "type": "null"
+       }
       ]
      },
      "payload_sv_type": {
@@ -160,8 +163,7 @@
       ]
      },
      "type": {
-      "$comment": "A DataType as signature JSON, as for a channel payload.",
-      "type": "object"
+      "$ref": "#/$defs/payload"
      },
      "sv_type": {
       "type": [
@@ -183,6 +185,115 @@
    "additionalProperties": {
     "type": "string"
    }
+  }
+ },
+ "$defs": {
+  "payload": {
+   "$comment": "A DataType as signature JSON (signature.py _payload_to_json).",
+   "type": "object",
+   "required": [
+    "kind"
+   ],
+   "properties": {
+    "kind": {
+     "enum": [
+      "int",
+      "array",
+      "struct"
+     ]
+    }
+   },
+   "allOf": [
+    {
+     "if": {
+      "properties": {
+       "kind": {
+        "const": "int"
+       }
+      }
+     },
+     "then": {
+      "required": [
+       "bits"
+      ],
+      "properties": {
+       "bits": {
+        "type": "integer"
+       },
+       "signed": {
+        "type": "boolean"
+       },
+       "four_state": {
+        "$comment": "4-state bits (SV logic). Written only when true; absent means 2-state or unstated. Additive, so no version bump.",
+        "type": "boolean"
+       }
+      }
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "kind": {
+        "const": "array"
+       }
+      }
+     },
+     "then": {
+      "required": [
+       "size",
+       "element"
+      ],
+      "properties": {
+       "size": {
+        "type": "integer"
+       },
+       "element": {
+        "$ref": "#/$defs/payload"
+       }
+      }
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "kind": {
+        "const": "struct"
+       }
+      }
+     },
+     "then": {
+      "required": [
+       "fields"
+      ],
+      "properties": {
+       "name": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "fields": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "required": [
+          "name",
+          "type"
+         ],
+         "properties": {
+          "name": {
+           "type": "string"
+          },
+          "type": {
+           "$ref": "#/$defs/payload"
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   ]
   }
  }
 }

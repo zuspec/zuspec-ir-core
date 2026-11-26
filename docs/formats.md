@@ -48,6 +48,8 @@ Version 3 (Phase 1, pin parity) describes function blocks too:
 
 It is a version bump rather than an added field because a version-2 reader would see a function block as having no pins at all. Version 1 and 2 files are still read, as procs.
 
+An `int` payload type (a channel `payload`, a data port `type`, or a struct field or array element inside one) may carry `four_state: true`: its bits are 4-state (SV `logic`), from `DataTypeInt.four_state`. The writer adds it only when true, so 2-state and unstated types write as before. A reader takes an absent field as unstated (`None`), since files written before the field never carry it. It is an additive optional field, so the version stays 3. The v3 schema describes the payload forms (`$defs/payload`).
+
 ## Versioning policy
 
 - **Bump `version`** for any change that alters what an existing file means. Examples: an anchor-grammar change, or renaming a field.

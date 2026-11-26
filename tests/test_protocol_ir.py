@@ -76,7 +76,9 @@ def _top():
                 ir.Field(name="seq", datatype=ir.DataTypeRef(ref_name="seq_t"))],
         bundle_protocols=[ir.BundleProtocol(
             target=[ir.ExprHierarchicalElem(name="ch", subscript=i)], protocol=_ref(8), role="bundle")],
-        api_endpoints=[ir.ApiEndpoint(name="out", kind="port", api="put_if")],
+        api_endpoints=[ir.ApiEndpoint(name="out", kind="port", api="put_if",
+                                      api_params={"W": ir.ExprConstant(value=8)},
+                                      api_scope="vr_pkg")],
         api_connections=[ir.ApiConnection(src=["seq", "out"], dst=["drv", "req"]),
                          ir.ApiConnection(kind="connect_up", src=["out"], dst=["seq", "out"])],
         cfg_publishers=[ir.CfgPublisher(name="cfg", cfg_type=ir.DataTypeRef(ref_name="vr_cfg_t"))],
@@ -97,6 +99,7 @@ def test_defaults():
     assert h.apis == [] and h.template_params == []
     e = ir.ApiEndpoint(name="e", kind="port")
     assert e.api is None and e.protocol is None and e.imp == []
+    assert e.api_params == {} and e.api_scope is None
     assert ir.ApiConnection().kind == "connect"
     assert ir.ProtocolConverter(from_proto=_ref(), to_proto=_ref()).role == ""
     assert isinstance(_ref(), ir.Expr) and isinstance(_hub(), ir.DataType)

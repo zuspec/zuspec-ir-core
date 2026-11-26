@@ -109,6 +109,10 @@ class DataTypeClass(DataTypeStruct):
     # the class implements, and a bundle class's protocol.
     implements:  List[str] = dc.field(default_factory=list)
     bundle_protocol: Optional['ProtocolRef'] = dc.field(default=None)
+    #: Types declared in the class (SV class-scope ``typedef``), in source
+    #: order. In a template's body they are written over the template's
+    #: parameters.
+    typedefs: List['TypeDef'] = dc.field(default_factory=list)
 
 @dc.dataclass(kw_only=True)
 class DataTypeAction(DataTypeClass):
@@ -204,6 +208,15 @@ class DataTypeComponent(DataTypeClass):
     # Process blocks (``proc_block.py``): the ``step`` and ``comb`` blocks
     # of a class-written component, with their domains and reset branches.
     proc_blocks:      List['ProcBlock'] = dc.field(default_factory=list)
+    # Lowered task-to-sync crossings (``proc_block.SyncXingRecord``): set by
+    # the crossing lowering pass, one per crossing port group the component
+    # has, its own and those lifted from its children.
+    sync_xings:       List['SyncXingRecord'] = dc.field(default_factory=list)
+    # Task code kept by the crossing lowering pass (``ProcKind.TASK``
+    # blocks, simulation only, not RTL): a crossing or an API port is named
+    # by its path (``ExprHierarchical``), a crossing's resolving against
+    # ``sync_xings``; other field references use the lowered field indices.
+    task_blocks:      List['ProcBlock'] = dc.field(default_factory=list)
 
 
 @dc.dataclass(kw_only=True)
@@ -405,6 +418,8 @@ class DataTypeAddrHandle(DataType):
 class DataTypeProtocol(DataType):
     """Represents a Python Protocol (interface definition)"""
     methods : List['Function'] = dc.field(default_factory=list)
+    #: Types declared in the interface (see ``DataTypeClass.typedefs``).
+    typedefs : List['TypeDef'] = dc.field(default_factory=list)
 
 @dc.dataclass(kw_only=True)
 class Function(Base):
@@ -439,6 +454,25 @@ class Process(Base):
 class DataTypeRef(DataType):
     """Reference to another type by name (for forward references)"""
     ref_name : str = dc.field()
+
+
+@dc.dataclass(kw_only=True)
+class TypeDef(Base):
+    """A type declared in a scope (SV ``typedef <datatype> <name>;``):
+    a local ``name`` for ``datatype``, which may be a struct or enum
+    declared here or a reference to another type."""
+    name : str = dc.field()
+    datatype : DataType = dc.field()
+
+
+@dc.dataclass(kw_only=True)
+class DataTypeMemberRef(DataType):
+    """A type declared in another type: ``member`` of ``base`` (SV
+    ``axi4_types #(P)::aw_t``, ``t::aw_t``). ``base`` is the class,
+    as a ``DataTypeSpecialized``, a ``DataTypeRef`` or another member
+    reference."""
+    base : DataType = dc.field()
+    member : str = dc.field()
 
 
 @dc.dataclass(kw_only=True)
@@ -747,5 +781,28 @@ class QueueType(DataType):
     """Type of a ``zdc.Queue[T]`` component field or local."""
     element_type: Optional[DataType] = dc.field(default=None)  # T
     depth:        int                 = dc.field(default=1)
+
+
+class SyncXingDir(enum.Enum):
+    """Direction of a task-to-sync crossing, named for where items go."""
+    TO_SYNC   = enum.auto()   # fw_to_sync: task code puts, step() takes
+    FROM_SYNC = enum.auto()   # fw_from_sync: step() gives, task code gets
+
+
+@dc.dataclass(kw_only=True)
+class DataTypeSyncXing(DataType):
+    """Type of a task-to-sync crossing field (fw-hdl ``fw_to_sync #(T)`` /
+    ``fw_from_sync #(T)``). One side is used by task (process) code, the
+    other by the owning component's ``step()``/``comb()``.
+
+    Unlike ``QueueType`` (a FIFO inside one component, synthesized as a
+    FIFO), the queue of a crossing is not part of the component's RTL: when
+    the sync side lowers, the crossing becomes ready/valid ports and
+    ``depth`` belongs to whatever drives them. Until that lowering, its
+    methods appear as ``ExprCall(ExprAttribute(ExprRefField(x), m))``.
+    """
+    direction:    SyncXingDir        = dc.field(default=SyncXingDir.TO_SYNC)
+    element_type: Optional[DataType] = dc.field(default=None)  # T
+    depth:        int                = dc.field(default=1)
 
 
