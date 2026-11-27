@@ -282,7 +282,13 @@ class PSSToScenarioPass:
             module.imports.append(ScImportDecl(
                 name=f.name, fn_id=fn_id, blocking=blocking,
                 arg_types=arg_types, ret_type=ret_type, string_at=string_at,
-                struct_at=struct_at))
+                struct_at=struct_at,
+                qname=(getattr(f, "metadata", None) or {}).get("qualified_name"),
+                is_target=bool(getattr(f, "is_target", False)),
+                is_solve=bool(getattr(f, "is_solve", False)),
+                params=[(a.arg, getattr(a, "annotation", None))
+                        for a in (getattr(args, "args", []) if args is not None else [])],
+                returns=f.returns))
 
         # --- TraversalResolve (partial): gather actions, grouped by owner ---
         actions = self._collect_actions(type_map)
@@ -395,6 +401,14 @@ class PSSToScenarioPass:
                         % inv.target, loc=inv.getLoc())
 
         # --- export selection ---
+        # One source set may serve several roots (pssc's root candidates):
+        # with the root given, an ``export`` statement for an action no
+        # component under it has is not this root's to lower; the front end
+        # reports it. With none of them under the root, the root's actions
+        # are exported as if the model declared none.
+        if self.root is not None and declared:
+            declared = [q for q in declared
+                        if q in self._coro_of or q not in dict(actions)]
         if self.exports is not None:
             module.export_actions = [coro_key(module, x) or x for x in self.exports]
         elif declared:

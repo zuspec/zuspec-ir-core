@@ -90,7 +90,7 @@ from .proc_block import ProcKind, ProcBlock, ExprInReset, XingPort, SyncXingUse,
 from .package import Package, PackageImport, PackageConst, PackageType
 from .expr import (
     Expr, BinOp, UnaryOp, BoolOp, CmpOp, AugOp,
-    ExprBin, ExprRef, ExprConstant, int_literal_type, TypeExprRefSelf, TypeExprRefSuper, TypeExprRefTraversed,
+    ExprBin, ExprRef, ExprConstant, int_literal_type, TypeExprRefSelf, TypeExprRefSuper, TypeExprRefRoot, TypeExprRefTraversed,
     ExprRefField,
     ExprRefParam, ExprRefLocal, ExprRefUnresolved, ExprRefPackage, ExprRefPy,
     ExprRefBottomUp, ExprUnary, ExprBool, ExprCompare,
@@ -221,7 +221,7 @@ __all__ = [
     "IfProtocolProperties","IfProtocolType","CompletionType","QueueType",
     "SyncXingDir","DataTypeSyncXing",
     "Expr","BinOp","UnaryOp","BoolOp","CmpOp","AugOp","ExprBin","ExprRef","ExprConstant","int_literal_type",
-    "TypeExprRefSelf","TypeExprRefSuper","TypeExprRefTraversed","ExprRefField","ExprRefParam","ExprRefLocal","ExprRefUnresolved","ExprRefPackage",
+    "TypeExprRefSelf","TypeExprRefSuper","TypeExprRefRoot","TypeExprRefTraversed","ExprRefField","ExprRefParam","ExprRefLocal","ExprRefUnresolved","ExprRefPackage",
     "ExprRefPy","ExprRefBottomUp","ExprUnary",
     "ExprBool","ExprCompare","ExprAttribute","ExprSlice","ExprSubscript","ExprCall","Keyword","ExprAwait",
     # PSS-specific expressions

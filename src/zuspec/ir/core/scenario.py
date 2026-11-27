@@ -398,6 +398,11 @@ class ScImportDecl(Base):
         struct_at: the positions (as for ``string_at``) whose declared
                    type is a plain-data struct, mapped to that type; a
                    backend passes such a value one field (leaf) at a time.
+        qname:     the qualified name the front end resolved
+                   (``dma_pkg::wait_done``), or ``None``; its scope is the
+                   API the import belongs to (bc's API section).
+        is_target: declared ``import target``.
+        is_solve:  declared ``import solve``.
     """
     name: str = dc.field()
     fn_id: int = dc.field()
@@ -406,6 +411,14 @@ class ScImportDecl(Base):
     ret_type: Optional[tuple] = dc.field(default=None)
     string_at: List = dc.field(default_factory=list)
     struct_at: Dict = dc.field(default_factory=dict)
+    qname: Optional[str] = dc.field(default=None)
+    is_target: bool = dc.field(default=False)
+    is_solve: bool = dc.field(default=False)
+    #: ``(name, DataType)`` per parameter as declared, and the declared
+    #: result type (None: void): what a host's typed API is generated from
+    #: (pssvm-in-practice 3.0.1). Not part of the ABI: ``arg_types`` is.
+    params: List = dc.field(default_factory=list, compare=False)
+    returns: Optional[Any] = dc.field(default=None, compare=False)
 
     def accept(self, v: 'Visitor') -> None:
         v.visitScImportDecl(self)

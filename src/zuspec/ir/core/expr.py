@@ -132,6 +132,20 @@ class TypeExprRefSuper(ExprRef):
     ...
 
 @dc.dataclass
+class TypeExprRefRoot(ExprRef):
+    """``pss_top``: the root component instance, whichever type the tool
+    makes the root (LRM 9.1; owner ruling, 2026-11-26).
+
+    A meta-name, written where nothing named ``pss_top`` is declared, or
+    naming a component type ``pss_top`` as a value. The linker leaves the
+    path unlinked, so the names after it (``pss_top.sub.get``) are found in
+    the root's type by name when the root is known -- at elaboration, once
+    per root candidate. It is how a package-scope function reaches the
+    component tree.
+    """
+    ...
+
+@dc.dataclass
 class TypeExprRefTraversed(ExprRef):
     """The action a traversal names, where its own names are in scope.
 
